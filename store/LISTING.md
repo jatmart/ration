@@ -152,11 +152,9 @@ Tick all three certifications:
 
 **Privacy policy URL**
 
-A direct link to `PRIVACY.md` once it is public. A repository's front page is not accepted. Two
-ways to host it:
-
-- A GitHub repository: open the file on GitHub and use that file's link.
-- A GitHub gist: paste the file's text into a new public gist and use the gist's link.
+```
+https://github.com/jatmart/ration/blob/main/PRIVACY.md
+```
 
 ---
 
