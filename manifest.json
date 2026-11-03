@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "Ration",
+  "short_name": "Ration",
+  "version": "1.0.0",
+  "description": "A few timed opens a day for the sites that eat your time. Streaks and stats. Everything stays on your device.",
+  "minimum_chrome_version": "120",
+  "incognito": "spanning",
+  "permissions": ["storage", "alarms", "idle", "declarativeNetRequest", "favicon"],
+  "optional_host_permissions": ["*://*/*"],
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "src/pages/popup.html",
+    "default_title": "Ration",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "options_page": "src/pages/dashboard.html",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["src/pages/gate.html"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

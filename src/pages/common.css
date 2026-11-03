@@ -1,0 +1,138 @@
+:root {
+  color-scheme: light;
+  --bg: #fafaf8;
+  --raised: #ffffff;
+  --line: #e7e6e1;
+  --line-strong: #cfcec8;
+  --text: #1b1b19;
+  --text-2: #5f5e59;
+  --text-3: #8b8a84;
+  --red: #d6302a;
+  --red-soft: #fbeceb;
+  --track: #ecebe6;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #161615;
+    --raised: #1f1f1d;
+    --line: #2d2d2a;
+    --line-strong: #43423e;
+    --text: #ecebe7;
+    --text-2: #a9a8a1;
+    --text-3: #7c7b75;
+    --red: #e5483d;
+    --red-soft: #3a1d1b;
+    --track: #2a2a27;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #161615;
+  --raised: #1f1f1d;
+  --line: #2d2d2a;
+  --line-strong: #43423e;
+  --text: #ecebe7;
+  --text-2: #a9a8a1;
+  --text-3: #7c7b75;
+  --red: #e5483d;
+  --red-soft: #3a1d1b;
+  --track: #2a2a27;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.45 var(--font);
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3, p { margin: 0; }
+h1, h2, h3 { font-weight: 600; line-height: 1.2; }
+
+a { color: inherit; }
+
+button {
+  font: inherit;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--text-3); }
+button:disabled { opacity: 0.45; cursor: default; }
+button.primary {
+  background: var(--text);
+  border-color: var(--text);
+  color: var(--bg);
+  font-weight: 600;
+}
+button.primary:hover:not(:disabled) { opacity: 0.88; }
+button.secondary { font-weight: 600; }
+button.quiet {
+  border-color: transparent;
+  color: var(--text-2);
+  padding-left: 0;
+  padding-right: 0;
+}
+button.quiet:hover:not(:disabled) { color: var(--text); border-color: transparent; }
+
+input, textarea {
+  font: inherit;
+  color: var(--text);
+  background: var(--raised);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  padding: 5px 8px;
+}
+input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
+}
+
+.muted { color: var(--text-2); }
+.faint { color: var(--text-3); }
+.num { font-variant-numeric: tabular-nums; }
+.red { color: var(--red); }
+
+.notice {
+  border-left: 2px solid var(--red);
+  padding: 2px 0 2px 12px;
+  font-size: 13px;
+  color: var(--text-2);
+}
+.notice strong { color: var(--text); font-weight: 600; }
+.notice code { font-family: var(--mono); font-size: 12px; }
+
+.bar {
+  position: relative;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--track);
+}
+.bar > .fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 2px;
+  background: var(--text);
+}
+.bar > .fill.over { background: var(--red); }
+.bar > .tick {
+  position: absolute;
+  top: -4px;
+  bottom: -4px;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--red);
+}
+
+[hidden] { display: none !important; }
