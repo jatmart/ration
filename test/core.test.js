@@ -91,110 +91,81 @@ test('group matching covers subdomains but not lookalike domains', () => {
 test('stricter numbers apply at once', () => {
   const s = stateWith([group()]);
   const res = core.saveConfig(s, { goalMinutes: 30, groups: [group({ opensPerDay: 2, minutesPerOpen: 5, waitSeconds: 30 })] }, T0);
-  assert.deepEqual(res, { applied: true, pending: false });
+  assert.deepEqual(res, { applied: true });
   const g = s.config.groups[0];
   assert.equal(g.opensPerDay, 2);
   assert.equal(g.minutesPerOpen, 5);
   assert.equal(g.waitSeconds, 30);
   assert.equal(s.config.goalMinutes, 30);
-  assert.equal(s.pending, null);
 });
 
-test('looser numbers wait 24 hours', () => {
+test('looser numbers apply at once and open the undo window', () => {
   const s = stateWith([group()]);
   const res = core.saveConfig(s, { goalMinutes: 90, groups: [group({ opensPerDay: 9, minutesPerOpen: 60, waitSeconds: 0 })] }, T0);
-  assert.equal(res.pending, true);
-  assert.equal(s.config.groups[0].opensPerDay, 3);
-  assert.equal(s.config.groups[0].minutesPerOpen, 10);
-  assert.equal(s.config.groups[0].waitSeconds, 10);
-  // The goal is not held back.
-  assert.equal(s.config.goalMinutes, 90);
-  assert.equal(s.pending.applyAt, T0 + core.PENDING_DELAY_MS);
-
-  assert.equal(core.applyPendingIfDue(s, T0 + core.PENDING_DELAY_MS - 1), false);
-  assert.equal(core.applyPendingIfDue(s, T0 + core.PENDING_DELAY_MS), true);
+  assert.deepEqual(res, { applied: true });
   assert.equal(s.config.groups[0].opensPerDay, 9);
+  assert.equal(s.config.groups[0].minutesPerOpen, 60);
+  assert.equal(s.config.groups[0].waitSeconds, 0);
   assert.equal(s.config.goalMinutes, 90);
-  assert.equal(s.pending, null);
+  assert.equal(s.change.since, T0);
+  assert.equal(s.change.base.groups[0].opensPerDay, 3);
+  assert.equal('pending' in s, false);
 });
 
-test('a mixed edit splits into a strict part now and a loose part later', () => {
+test('a mixed edit applies whole and counts as looser', () => {
   const s = stateWith([group()]);
   core.saveConfig(s, { goalMinutes: 60, groups: [group({ opensPerDay: 1, minutesPerOpen: 30 })] }, T0);
   assert.equal(s.config.groups[0].opensPerDay, 1);
-  assert.equal(s.config.groups[0].minutesPerOpen, 10);
-  assert.equal(s.pending.config.groups[0].minutesPerOpen, 30);
+  assert.equal(s.config.groups[0].minutesPerOpen, 30);
+  assert.ok(core.stillLoose(s));
 });
 
-test('adding a domain applies now, removing one waits', () => {
+test('adding and removing a domain both apply at once', () => {
   const s = stateWith([group()]);
   core.saveConfig(s, { goalMinutes: 60, groups: [group({ domains: ['youtube.com', 'youtube-nocookie.com'] })] }, T0);
-  assert.deepEqual(s.config.groups[0].domains, ['youtube.com', 'youtu.be', 'youtube-nocookie.com']);
-  assert.deepEqual(s.pending.config.groups[0].domains, ['youtube.com', 'youtube-nocookie.com']);
+  assert.deepEqual(s.config.groups[0].domains, ['youtube.com', 'youtube-nocookie.com']);
+  assert.ok(core.stillLoose(s), 'dropping youtu.be is looser');
 });
 
-test('removing a site waits, adding a site applies now', () => {
+test('removing a site applies at once and counts as looser', () => {
   const s = stateWith([group()]);
   const reddit = { id: 'rd', name: 'Reddit', domains: ['reddit.com'], opensPerDay: 2, minutesPerOpen: 5, waitSeconds: 5 };
   core.saveConfig(s, { goalMinutes: 60, groups: [reddit] }, T0);
-  assert.deepEqual(s.config.groups.map((g) => g.id).sort(), ['rd', 'yt']);
-  assert.deepEqual(s.pending.config.groups.map((g) => g.id), ['rd']);
-  assert.equal(s.config.groups.find((g) => g.id === 'rd').createdAt, T0);
+  assert.deepEqual(s.config.groups.map((g) => g.id), ['rd']);
+  assert.equal(s.config.groups[0].createdAt, T0);
+  assert.ok(core.stillLoose(s));
 });
 
 test('a new site is free to edit or remove during the grace period only', () => {
   const s = stateWith([]);
   core.saveConfig(s, { goalMinutes: 60, groups: [group()] }, T0);
-  core.saveConfig(s, { goalMinutes: 60, groups: [group({ opensPerDay: 20 })] }, T0 + 5 * 60_000);
+  core.saveConfig(s, { goalMinutes: 60, groups: [group({ opensPerDay: 20 })] }, T0 + 60_000);
   assert.equal(s.config.groups[0].opensPerDay, 20);
-  assert.equal(s.pending, null);
+  assert.equal(core.stillLoose(s), false);
 
-  core.saveConfig(s, { goalMinutes: 60, groups: [] }, T0 + 6 * 60_000);
+  core.saveConfig(s, { goalMinutes: 60, groups: [] }, T0 + 2 * 60_000);
   assert.equal(s.config.groups.length, 0);
+  assert.equal(core.stillLoose(s), false);
 
-  core.saveConfig(s, { goalMinutes: 60, groups: [group()] }, T0 + 7 * 60_000);
-  core.saveConfig(s, { goalMinutes: 60, groups: [] }, T0 + 7 * 60_000 + core.GRACE_MS);
-  assert.equal(s.config.groups.length, 1);
-  assert.ok(s.pending);
+  core.saveConfig(s, { goalMinutes: 60, groups: [group()] }, T0 + 2.5 * 60_000);
+  core.saveConfig(s, { goalMinutes: 60, groups: [] }, T0 + 2.5 * 60_000 + core.GRACE_MS);
+  assert.equal(s.config.groups.length, 0);
+  assert.ok(core.stillLoose(s), 'after the grace period, removing counts as looser');
 });
 
 test('the page cannot fake createdAt to reopen the grace period', () => {
   const s = stateWith([group()]);
+  const created = s.config.groups[0].createdAt;
   core.saveConfig(s, { goalMinutes: 60, groups: [{ ...group({ opensPerDay: 50 }), createdAt: T0 }] }, T0);
-  assert.equal(s.config.groups[0].opensPerDay, 3);
+  assert.equal(s.config.groups[0].createdAt, created);
+  assert.ok(core.stillLoose(s));
 });
 
-test('renaming a group to a new id cannot delete it', () => {
+test('swapping a site for a new id counts as looser', () => {
   const s = stateWith([group()]);
   core.saveConfig(s, { goalMinutes: 60, groups: [group({ id: 'yt2', opensPerDay: 50 })] }, T0);
-  const ids = s.config.groups.map((g) => g.id).sort();
-  assert.deepEqual(ids, ['yt', 'yt2']);
-  assert.equal(s.config.groups.find((g) => g.id === 'yt').opensPerDay, 3);
-});
-
-test('a later edit no looser than the queued one keeps the timer', () => {
-  const s = stateWith([group()]);
-  core.saveConfig(s, { goalMinutes: 60, groups: [group({ opensPerDay: 5 })] }, T0);
-  const applyAt = s.pending.applyAt;
-  // Adds a new site: stricter than the queued edit.
-  const extra = { id: 'tt', name: 'TikTok', domains: ['tiktok.com'], opensPerDay: 1, minutesPerOpen: 5, waitSeconds: 5 };
-  core.saveConfig(s, { goalMinutes: 60, groups: [group({ opensPerDay: 5 }), extra] }, T0 + 12 * H);
-  assert.equal(s.pending.applyAt, applyAt);
-  assert.ok(s.config.groups.some((g) => g.id === 'tt'));
-});
-
-test('a later edit looser than the queued one restarts the timer', () => {
-  const s = stateWith([group()]);
-  core.saveConfig(s, { goalMinutes: 60, groups: [group({ opensPerDay: 5 })] }, T0);
-  core.saveConfig(s, { goalMinutes: 60, groups: [group({ opensPerDay: 6 })] }, T0 + 12 * H);
-  assert.equal(s.pending.applyAt, T0 + 12 * H + core.PENDING_DELAY_MS);
-});
-
-test('saving the current config clears a queued edit', () => {
-  const s = stateWith([group()]);
-  core.saveConfig(s, { goalMinutes: 60, groups: [group({ opensPerDay: 5 })] }, T0);
-  core.saveConfig(s, { goalMinutes: 60, groups: [group()] }, T0 + H);
-  assert.equal(s.pending, null);
+  assert.ok(core.stillLoose(s));
+  assert.ok(core.stillLoose(s));
 });
 
 test('cleanConfig clamps numbers, drops bad domains and empty groups', () => {
@@ -213,11 +184,10 @@ test('cleanConfig clamps numbers, drops bad domains and empty groups', () => {
   });
 });
 
-test('applying a queued edit keeps createdAt from the live config', () => {
+test('an edit keeps createdAt from the live config', () => {
   const s = stateWith([group()]);
   const created = s.config.groups[0].createdAt;
   core.saveConfig(s, { goalMinutes: 60, groups: [group({ opensPerDay: 5 })] }, T0);
-  core.applyPendingIfDue(s, T0 + core.PENDING_DELAY_MS);
   assert.equal(s.config.groups[0].createdAt, created);
 });
 
@@ -376,7 +346,7 @@ test('migrate keeps limits, streak, and opens from version 1', () => {
   assert.equal(s.tracking, null);
   assert.equal(s.version, core.STATE_VERSION);
   assert.equal(s.config.goalMinutes, 90);
-  assert.equal(s.pending, null, 'the queued edit only changed the goal');
+  assert.equal('pending' in s, false, 'the queue is gone');
   // The queued edit predates the streak rule, so it does not reset the streak.
   core.tick(s, T0 + H);
   assert.equal(s.streak.current, 5);
@@ -447,34 +417,34 @@ function streakState(current = 5) {
 const looser = { goalMinutes: 60, groups: [group({ opensPerDay: 6 })] };
 const original = { goalMinutes: 60, groups: [group()] };
 
-test('a looser change resets the streak 10 minutes later', () => {
+test('a looser change resets the streak 3 minutes later', () => {
   const s = streakState();
   core.saveConfig(s, looser, T0);
   core.tick(s, T0 + core.GRACE_MS - 1);
   assert.equal(s.streak.current, 5);
   core.tick(s, T0 + core.GRACE_MS);
   assert.equal(s.streak.current, 0);
-  assert.equal(s.loose, null);
+  assert.equal(core.stillLoose(s), false);
   // The day of the loosening does not count either.
   core.tick(s, at(2026, 11, 3, 9));
   assert.equal(s.streak.current, 0);
   assert.equal(s.streak.best, 5);
 });
 
-test('cancelling a looser change within 10 minutes keeps the streak', () => {
+test('Undo within 3 minutes keeps the streak', () => {
   const s = streakState();
   core.saveConfig(s, looser, T0);
-  core.cancelPending(s);
+  core.undoLoosening(s, T0 + 60_000);
+  assert.equal(s.config.groups[0].opensPerDay, 3);
   core.tick(s, T0 + core.GRACE_MS + 1);
   core.tick(s, at(2026, 11, 3, 9));
   assert.equal(s.streak.current, 6);
 });
 
-test('saving the old values back within 10 minutes keeps the streak', () => {
+test('saving the old values back within 3 minutes keeps the streak', () => {
   const s = streakState();
   core.saveConfig(s, looser, T0);
-  core.saveConfig(s, original, T0 + 9 * 60_000);
-  assert.equal(s.pending, null);
+  core.saveConfig(s, original, T0 + 2 * 60_000);
   core.tick(s, at(2026, 11, 3, 9));
   assert.equal(s.streak.current, 6);
 });
@@ -489,7 +459,7 @@ test('a raised goal counts as loosening', () => {
 test('stricter changes never touch the streak', () => {
   const s = streakState();
   const stricter = { goalMinutes: 30, groups: [group({ opensPerDay: 1, minutesPerOpen: 5, waitSeconds: 60, domains: ['youtube.com', 'youtu.be', 'yt.be'] })] };
-  assert.deepEqual(core.saveConfig(s, stricter, T0), { applied: true, pending: false });
+  assert.deepEqual(core.saveConfig(s, stricter, T0), { applied: true });
   core.tick(s, at(2026, 11, 3, 9));
   assert.equal(s.streak.current, 6);
 });
@@ -499,22 +469,21 @@ test('edits to a site inside its free-edit period never touch the streak', () =>
   const reddit = { id: 'rd', name: 'Reddit', domains: ['reddit.com'], opensPerDay: 1, minutesPerOpen: 5, waitSeconds: 5 };
   core.saveConfig(s, { goalMinutes: 60, groups: [group(), reddit] }, T0);
   core.saveConfig(s, { goalMinutes: 60, groups: [group()] }, T0 + 60_000);
-  assert.equal(s.pending, null);
   core.tick(s, at(2026, 11, 3, 9));
   assert.equal(s.streak.current, 6);
 });
 
-test('a second looser edit does not extend the 10-minute window', () => {
+test('a second looser edit does not extend the 3-minute window', () => {
   const s = streakState();
   core.saveConfig(s, looser, T0);
-  core.saveConfig(s, { goalMinutes: 60, groups: [group({ opensPerDay: 8 })] }, T0 + 8 * 60_000);
+  core.saveConfig(s, { goalMinutes: 60, groups: [group({ opensPerDay: 8 })] }, T0 + 2 * 60_000);
   core.tick(s, T0 + core.GRACE_MS);
   assert.equal(s.streak.current, 0);
 });
 
-test('a loosening left queued while the browser was closed still resets the streak', () => {
+test('a looser edit left in place while the browser was closed still resets the streak', () => {
   const s = streakState();
-  core.saveConfig(s, looser, at(2026, 11, 2, 23, 55));
+  core.saveConfig(s, looser, at(2026, 11, 2, 23, 59));
   // The browser closed before the window ended and opened two days later.
   core.tick(s, at(2026, 11, 4, 9));
   assert.equal(s.streak.current, 0);
@@ -540,14 +509,14 @@ test('groups keep their name and color slot after removal', () => {
 
 // ---------- goal changes apply at once ----------
 
-test('a raised goal applies today and resets the streak unless lowered within 10 minutes', () => {
+test('a raised goal applies today and resets the streak unless lowered within 3 minutes', () => {
   const s = streakState();
   core.saveConfig(s, { goalMinutes: 120, groups: [group()] }, T0);
   assert.equal(s.config.goalMinutes, 120);
   assert.equal(core.dayGoalMinutes(s, s.lastDay), 120);
-  assert.ok(s.loose);
-  core.saveConfig(s, original, T0 + 5 * 60_000);
-  assert.equal(s.loose, null);
+  assert.ok(core.stillLoose(s));
+  core.saveConfig(s, original, T0 + 2 * 60_000);
+  assert.equal(core.stillLoose(s), false);
   core.tick(s, at(2026, 11, 3, 9));
   assert.equal(s.streak.current, 6);
 });
@@ -557,41 +526,50 @@ test('time used under a raised goal fails the day once the goal goes back', () =
   core.saveConfig(s, { goalMinutes: 120, groups: [group()] }, T0);
   core.recordTime(s, 'youtube.com', 90 * 60);
   assert.equal(s.days[s.lastDay].failed, false);
-  core.saveConfig(s, original, T0 + 5 * 60_000);
+  core.saveConfig(s, original, T0 + 2 * 60_000);
   assert.equal(s.days[s.lastDay].failed, true);
 });
 
-test('undoLoosening restores the goal, drops the queued edit, and keeps later tightenings', () => {
+test('undoLoosening restores the goal and limits, and keeps later tightenings', () => {
   const s = streakState();
-  core.saveConfig(s, { goalMinutes: 90, groups: [group({ opensPerDay: 9 })] }, T0);
+  core.saveConfig(s, { goalMinutes: 90, groups: [group({ opensPerDay: 9, waitSeconds: 60 })] }, T0);
   const tt = { id: 'tt', name: 'TikTok', domains: ['tiktok.com'], opensPerDay: 1, minutesPerOpen: 5, waitSeconds: 5 };
-  core.saveConfig(s, { goalMinutes: 90, groups: [group({ opensPerDay: 9 }), tt] }, T0 + 60_000);
+  core.saveConfig(s, { goalMinutes: 90, groups: [group({ opensPerDay: 9, waitSeconds: 60 }), tt] }, T0 + 60_000);
   core.undoLoosening(s, T0 + 2 * 60_000);
   assert.equal(s.config.goalMinutes, 60);
-  assert.equal(s.pending, null);
-  assert.equal(s.loose, null);
-  assert.ok(s.config.groups.some((g) => g.id === 'tt'));
+  assert.equal(s.config.groups[0].opensPerDay, 3);
+  assert.equal(s.config.groups[0].waitSeconds, 60, 'the longer wait stays');
+  assert.equal(core.stillLoose(s), false);
+  const added = s.config.groups.find((g) => g.id === 'tt');
+  assert.equal(added.createdAt, T0 + 60_000, 'undo does not restart its free-edit period');
   core.tick(s, at(2026, 11, 3, 9));
   assert.equal(s.streak.current, 6);
 });
 
-test('undoLoosening puts back an older queued edit with its timer', () => {
+test('undoLoosening brings back a removed site, and it keeps its access until then', () => {
   const s = streakState();
-  core.saveConfig(s, { goalMinutes: 60, groups: [group({ opensPerDay: 5 })] }, T0);
-  core.tick(s, T0 + core.GRACE_MS); // The first window closes and resets the streak.
-  const older = structuredClone(s.pending);
-  core.saveConfig(s, { goalMinutes: 60, groups: [group({ opensPerDay: 9 })] }, T0 + H);
-  assert.ok(s.loose);
-  core.undoLoosening(s, T0 + H + 60_000);
-  assert.equal(s.loose, null);
-  assert.equal(s.pending.config.groups[0].opensPerDay, 5);
-  assert.equal(s.pending.applyAt, older.applyAt);
+  const created = s.config.groups[0].createdAt;
+  core.saveConfig(s, { goalMinutes: 60, groups: [] }, T0);
+  assert.equal(s.config.groups.length, 0);
+  assert.deepEqual(core.unusedOrigins(s, ['*://*.youtube.com/*']), [], 'Undo still needs this access');
+  core.undoLoosening(s, T0 + 60_000);
+  assert.equal(s.config.groups.length, 1);
+  assert.equal(s.config.groups[0].createdAt, created);
+  assert.equal(core.stillLoose(s), false);
+});
+
+test('access for a removed site goes once the window has ended', () => {
+  const s = streakState();
+  core.saveConfig(s, { goalMinutes: 60, groups: [] }, T0);
+  assert.equal(core.tick(s, T0 + core.GRACE_MS).configChanged, true, 'the worker releases access on this signal');
+  assert.deepEqual(core.unusedOrigins(s, ['*://*.youtube.com/*']), ['*://*.youtube.com/*']);
+  assert.equal(s.streak.current, 0);
 });
 
 test('lowering the goal never opens a loosening window', () => {
   const s = streakState();
   core.saveConfig(s, { goalMinutes: 10, groups: [group()] }, T0);
-  assert.equal(s.loose, null);
+  assert.equal(core.stillLoose(s), false);
   assert.equal(s.config.goalMinutes, 10);
 });
 
@@ -643,20 +621,52 @@ test('only the open for the active site runs', () => {
   assert.equal(s.sessions.rd.usedMs, 3 * 60_000);
 });
 
-test('migrate from version 2 converts opens and applies a queued goal', () => {
+test('migrate from version 2 converts opens and applies a queued edit', () => {
   const v2 = core.defaultState(T0);
   v2.version = 2;
-  delete v2.loose;
+  delete v2.change;
   v2.config = { goalMinutes: 30, groups: [{ ...group(), createdAt: T0 - 48 * H }] };
   v2.pending = { config: { goalMinutes: 45, groups: [group({ opensPerDay: 5 })] }, requestedAt: T0 - 60_000, applyAt: T0 + 23 * H, looseSince: T0 - 60_000, streakReset: false };
   v2.sessions = { yt: { start: T0 - 60_000, end: T0 + 4 * 60_000 } };
   const s = core.migrate(v2, T0);
-  assert.equal(s.version, 3);
+  assert.equal(s.version, core.STATE_VERSION);
   assert.equal(s.config.goalMinutes, 45);
-  assert.equal(s.pending.config.groups[0].opensPerDay, 5);
-  assert.equal(s.pending.looseSince, undefined);
-  assert.deepEqual(s.loose, { since: T0 - 60_000, baseGoal: 30, basePending: null });
+  assert.equal(s.config.groups[0].opensPerDay, 5);
+  assert.equal('pending' in s, false);
+  assert.equal(s.change.since, T0 - 60_000);
+  assert.equal(s.change.base.goalMinutes, 30);
+  assert.equal(s.change.base.groups[0].opensPerDay, 3);
   assert.deepEqual(s.sessions.yt, { start: T0 - 60_000, limitMs: 4 * 60_000, usedMs: 0, activeSince: null });
+});
+
+test('migrate from version 3 applies a queued edit and keeps the streak window', () => {
+  const created = T0 - 48 * H;
+  const v3 = core.defaultState(T0);
+  v3.version = 3;
+  delete v3.change;
+  v3.streak.current = 7;
+  v3.config = { goalMinutes: 60, groups: [{ ...group(), createdAt: created }] };
+  v3.pending = { config: { goalMinutes: 60, groups: [group({ opensPerDay: 8 })] }, requestedAt: T0 - 60_000, applyAt: T0 + 23 * H };
+  v3.loose = { since: T0 - 60_000, baseGoal: 60, basePending: null };
+  const s = core.migrate(v3, T0);
+  assert.equal(s.version, core.STATE_VERSION);
+  assert.equal(s.config.groups[0].opensPerDay, 8);
+  assert.equal(s.config.groups[0].createdAt, created);
+  assert.equal('pending' in s, false);
+  assert.ok(core.stillLoose(s), 'the edit that was queued still counts as looser');
+  core.undoLoosening(s, T0);
+  assert.equal(s.config.groups[0].opensPerDay, 3);
+});
+
+test('migrate from version 3 with nothing queued changes no limits', () => {
+  const v3 = core.defaultState(T0);
+  v3.version = 3;
+  delete v3.change;
+  v3.pending = null;
+  v3.config = { goalMinutes: 45, groups: [{ ...group(), createdAt: T0 - 48 * H }] };
+  const s = core.migrate(structuredClone(v3), T0);
+  assert.deepEqual(s.config, v3.config);
+  assert.equal(core.stillLoose(s), false);
 });
 
 // ---------- site access ----------
@@ -676,10 +686,10 @@ test('domainCovered matches the patterns Brave grants', () => {
   assert.equal(core.domainCovered([], 'youtube.com'), false);
 });
 
-test('unusedOrigins lists access no saved or queued site needs', () => {
+test('unusedOrigins lists access no saved site or open undo window needs', () => {
   const s = stateWith([group()]);
   const rd = { id: 'rd', name: 'Reddit', domains: ['reddit.com'], opensPerDay: 1, minutesPerOpen: 5, waitSeconds: 0 };
-  s.pending = { config: { goalMinutes: 60, groups: [group(), rd] }, requestedAt: T0, applyAt: T0 + H };
+  s.change = { since: T0, base: { goalMinutes: 60, groups: [group(), rd] } };
   const granted = ['*://*.youtube.com/*', '*://*.youtu.be/*', '*://*.reddit.com/*', '*://*.tiktok.com/*', '*://*/*'];
   assert.deepEqual(core.unusedOrigins(s, granted), ['*://*.tiktok.com/*']);
 });
@@ -696,4 +706,170 @@ test('domains without access get a plain block that holds even during an open', 
   rules = core.buildRules(s, T0 + 1000, 'chrome-extension://abc/gate.html', canSee);
   assert.deepEqual(rules.map((r) => [r.action.type, r.condition.requestDomains]), [['block', ['youtu.be']]]);
   assert.equal(new Set(core.buildRules(stateWith([group(), { ...group(), id: 'b' }]), T0, 'x', () => false).map((r) => r.id)).size, 2);
+});
+
+// ---------- changing your mind after a tightening ----------
+
+const M = 60_000;
+const edit = (s, over, now, goalMinutes = 60) => core.saveConfig(s, { goalMinutes, groups: [group(over)] }, now);
+
+test('a dropped limit can go back within 3 minutes with no streak risk', () => {
+  const s = stateWith([group()]);
+  s.streak.current = 12;
+  edit(s, { opensPerDay: 2 }, T0);
+  assert.equal(s.config.groups[0].opensPerDay, 2, 'the drop applies at once');
+  edit(s, { opensPerDay: 3 }, T0 + 2 * M);
+  assert.equal(s.config.groups[0].opensPerDay, 3);
+  assert.equal(core.stillLoose(s), false);
+  core.settleLoosening(s, T0 + 30 * M);
+  assert.equal(s.streak.current, 12);
+});
+
+test('raising a drop after 3 minutes counts as looser, and it applies at once', () => {
+  const s = stateWith([group()]);
+  edit(s, { opensPerDay: 2 }, T0);
+  edit(s, { opensPerDay: 3 }, T0 + core.GRACE_MS);
+  assert.equal(s.config.groups[0].opensPerDay, 3);
+  assert.equal(s.change.since, T0 + core.GRACE_MS);
+  assert.equal(s.change.base.groups[0].opensPerDay, 2);
+});
+
+test('the window never reaches past the starting values', () => {
+  const s = stateWith([group()]);
+  edit(s, { opensPerDay: 2 }, T0);
+  edit(s, { opensPerDay: 5 }, T0 + 60_000);
+  assert.equal(s.config.groups[0].opensPerDay, 5);
+  assert.equal(s.change.base.groups[0].opensPerDay, 3, 'measured from the start, not the drop');
+  core.undoLoosening(s, T0 + 2 * 60_000);
+  assert.equal(s.config.groups[0].opensPerDay, 3);
+});
+
+test('more drops do not extend the window or move its starting values', () => {
+  const s = stateWith([group({ opensPerDay: 5 })]);
+  edit(s, { opensPerDay: 4 }, T0);
+  edit(s, { opensPerDay: 3 }, T0 + 2 * M);
+  edit(s, { opensPerDay: 4 }, T0 + 2.5 * M);
+  assert.equal(core.stillLoose(s), false, 'a partial step back is free');
+  assert.equal(s.change.since, T0);
+  edit(s, { opensPerDay: 5 }, T0 + 4 * M);
+  assert.ok(core.stillLoose(s), 'the window ended 3 minutes after the first drop');
+});
+
+test('going all the way back closes the window, and the next drop gets its own', () => {
+  const s = stateWith([group()]);
+  edit(s, { opensPerDay: 2 }, T0);
+  edit(s, { opensPerDay: 3 }, T0 + M);
+  assert.equal(s.change, null);
+  edit(s, { opensPerDay: 2 }, T0 + 20 * M);
+  edit(s, { opensPerDay: 3 }, T0 + 22 * M);
+  assert.equal(s.config.groups[0].opensPerDay, 3);
+  assert.equal(core.stillLoose(s), false);
+});
+
+test('going up, back down, and up again counts as looser', () => {
+  const s = stateWith([group()]);
+  s.streak.current = 12;
+  edit(s, { opensPerDay: 4 }, T0);
+  edit(s, { opensPerDay: 3 }, T0 + M);
+  edit(s, { opensPerDay: 4 }, T0 + 2 * M);
+  assert.ok(core.stillLoose(s));
+  assert.equal(core.looseDeadline(s), T0 + 2 * M + core.GRACE_MS);
+  core.tick(s, T0 + 2 * M + core.GRACE_MS);
+  assert.equal(s.streak.current, 0);
+});
+
+test('going up, below the start, and up again keeps the original start', () => {
+  const s = stateWith([group()]);
+  edit(s, { opensPerDay: 4 }, T0);
+  edit(s, { opensPerDay: 2 }, T0 + M);
+  assert.equal(core.stillLoose(s), false);
+  edit(s, { opensPerDay: 4 }, T0 + 2 * M);
+  assert.ok(core.stillLoose(s));
+  assert.equal(s.change.base.groups[0].opensPerDay, 3);
+});
+
+test('a looser edit late in a window gets the full 3 minutes to undo', () => {
+  const s = stateWith([group()]);
+  edit(s, { opensPerDay: 2 }, T0);
+  edit(s, { opensPerDay: 5 }, T0 + 2 * M);
+  assert.equal(core.looseDeadline(s), T0 + 2 * M + core.GRACE_MS);
+});
+
+test('nothing is at risk after a stricter change', () => {
+  const s = stateWith([group()]);
+  edit(s, { opensPerDay: 2 }, T0);
+  assert.equal(core.looseDeadline(s), null);
+});
+
+test('minutes, wait, and an added domain can go back too', () => {
+  const s = stateWith([group()]);
+  edit(s, { minutesPerOpen: 5, waitSeconds: 30, domains: ['youtube.com', 'youtu.be', 'yt.be'] }, T0);
+  assert.equal(s.config.groups[0].domains.length, 3);
+  edit(s, {}, T0 + M);
+  const g = s.config.groups[0];
+  assert.equal(g.minutesPerOpen, 10);
+  assert.equal(g.waitSeconds, 10);
+  assert.deepEqual(g.domains, ['youtube.com', 'youtu.be']);
+});
+
+test('dropping a domain from before the window still counts as looser', () => {
+  const s = stateWith([group()]);
+  edit(s, { opensPerDay: 2 }, T0);
+  edit(s, { opensPerDay: 2, domains: ['youtube.com'] }, T0 + M);
+  assert.deepEqual(s.config.groups[0].domains, ['youtube.com']);
+  assert.ok(core.stillLoose(s));
+});
+
+test('a lowered goal can go back within 3 minutes', () => {
+  const s = stateWith([group()]);
+  s.streak.current = 12;
+  edit(s, {}, T0, 45);
+  edit(s, {}, T0 + M, 60);
+  assert.equal(s.config.goalMinutes, 60);
+  assert.equal(core.stillLoose(s), false);
+  core.settleLoosening(s, T0 + 30 * M);
+  assert.equal(s.streak.current, 12);
+});
+
+test('raising the goal past its starting value still counts as loosening', () => {
+  const s = stateWith([group()]);
+  edit(s, {}, T0, 45);
+  edit(s, {}, T0 + M, 90);
+  assert.ok(core.stillLoose(s));
+  assert.equal(s.change.base.goalMinutes, 60);
+});
+
+test('setting the clock back closes the window', () => {
+  const s = stateWith([group()]);
+  edit(s, { opensPerDay: 2 }, T0);
+  edit(s, { opensPerDay: 3 }, T0 - H);
+  assert.ok(core.stillLoose(s), 'raising it counts as looser');
+});
+
+test('going back does not refund opens already used', () => {
+  const s = stateWith([group()]);
+  s.days[s.lastDay] = { opens: { yt: 2 }, limited: {}, goal: 60, failed: false, loosened: false };
+  edit(s, { opensPerDay: 2 }, T0);
+  assert.equal(core.opensLeft(s, s.config.groups[0]), 0);
+  edit(s, { opensPerDay: 3 }, T0 + M);
+  assert.equal(core.opensLeft(s, s.config.groups[0]), 1);
+});
+
+test('the page cannot set the window itself', () => {
+  const s = stateWith([group()]);
+  core.saveConfig(s, { goalMinutes: 60, change: { since: T0, base: { goalMinutes: 999, groups: [] } }, groups: [group()] }, T0);
+  assert.equal(s.change, null);
+});
+
+test('migrate from version 4 keeps an open window and drops the rest', () => {
+  const v4 = stateWith([group({ opensPerDay: 5 })]);
+  v4.version = 4;
+  delete v4.change;
+  v4.loose = { since: T0, base: { goalMinutes: 60, groups: [group()] } };
+  v4.tight = { since: T0, config: { goalMinutes: 60, groups: [group()] } };
+  const s = core.migrate(v4, T0);
+  assert.equal(s.version, core.STATE_VERSION);
+  assert.equal('loose' in s, false);
+  assert.equal('tight' in s, false);
+  assert.ok(core.stillLoose(s));
 });

@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Ration",
   "short_name": "Ration",
-  "version": "1.0.0",
+  "version": "1.0.3",
   "description": "A few timed opens a day for the sites that eat your time. Streaks and stats. Everything stays on your device.",
   "minimum_chrome_version": "120",
   "incognito": "spanning",

@@ -89,13 +89,25 @@ try {
     if (p) await light(p);
   });
 
+  const GATE_ZOOM = 2.2;
+  const DASHBOARD_ZOOM = 1.45;
+
   const hideNotices = (page) =>
     page.evaluate(() => document.querySelectorAll('.notice').forEach((n) => n.remove()));
 
-  async function shot(page, name) {
-    await page.screenshot({ path: join(OUT, name), clip: { x: 0, y: 0, width: 1280, height: 800 } });
+  // Lays the page out in a smaller window and scales it to 1280x800, so it stays
+  // readable at the size the store gallery shows it.
+  async function shot(page, name, zoom) {
+    // A multiple of 8 keeps the 8:5 shape exact. The store rejects 1280x801.
+    const width = Math.round(1280 / zoom / 8) * 8;
+    const deviceScaleFactor = 1280 / width;
+    await page.setViewport({ width, height: (width * 5) / 8, deviceScaleFactor });
+    await page.screenshot({ path: join(OUT, name) });
     console.log(`store/${name}`);
   }
+
+  const removeAll = (page, selector) =>
+    page.evaluate((s) => document.querySelectorAll(s).forEach((n) => n.remove()), selector);
 
   // ---------- 1. the gate ----------
 
@@ -104,13 +116,13 @@ try {
   await gate.goto('https://www.youtube.com/watch?v=dQw4w9WgXcQ').catch(() => {});
   await gate.waitForSelector('button.primary:not([disabled])', { timeout: 20_000 });
   await gate.evaluate(() => document.activeElement?.blur());
-  await shot(gate, '1-gate.png');
+  await shot(gate, '1-gate.png', GATE_ZOOM);
 
   // ---------- 2. done for the day ----------
 
   await gate.goto('https://www.reddit.com/r/all').catch(() => {});
   await gate.waitForFunction(() => document.body.innerText.includes('used all'));
-  await shot(gate, '2-done-for-today.png');
+  await shot(gate, '2-done-for-today.png', GATE_ZOOM);
   await gate.close();
 
   // ---------- 3. stats ----------
@@ -121,8 +133,9 @@ try {
   await dash.waitForSelector('.chart-svg path');
   await dash.evaluate(() => [...document.querySelectorAll('.seg button')].find((b) => b.textContent === 'Month').click());
   await hideNotices(dash);
+  await removeAll(dash, '.facts');
   await dash.evaluate(() => window.scrollTo(0, 0));
-  await shot(dash, '3-stats.png');
+  await shot(dash, '3-stats.png', DASHBOARD_ZOOM);
 
   // ---------- 4. limits ----------
 
@@ -130,7 +143,8 @@ try {
   await dash.reload();
   await dash.waitForSelector('.site-row');
   await hideNotices(dash);
-  await shot(dash, '4-limits.png');
+  await removeAll(dash, '.presets, .faint');
+  await shot(dash, '4-limits.png', DASHBOARD_ZOOM);
   await dash.close();
 
   // ---------- 5. popup beside the privacy promise ----------
@@ -149,11 +163,11 @@ try {
   await frame.setContent(`<!doctype html><html><head><style>
     body { margin: 0; width: 1280px; height: 800px; display: grid; grid-template-columns: 1fr 1fr; align-items: center;
       background: #f3f2ee; font-family: system-ui, "Segoe UI", sans-serif; color: #1b1b19; }
-    .copy { padding: 0 40px 0 110px; }
-    .copy img { width: 72px; height: 72px; }
-    h1 { font-size: 46px; line-height: 1.1; margin: 24px 0 18px; font-weight: 650; letter-spacing: -0.02em; }
-    p { font-size: 20px; line-height: 1.5; color: #5f5e59; margin: 0; max-width: 470px; }
-    .shot { justify-self: center; width: 330px; border-radius: 12px; background: #fafaf8; box-shadow: 0 18px 50px rgb(0 0 0 / 0.16), 0 0 0 1px rgb(0 0 0 / 0.06); }
+    .copy { padding: 0 20px 0 72px; }
+    .copy img { width: 104px; height: 104px; }
+    h1 { font-size: 64px; line-height: 1.08; margin: 26px 0 22px; font-weight: 650; letter-spacing: -0.02em; }
+    p { font-size: 27px; line-height: 1.4; color: #5f5e59; margin: 0; }
+    .shot { justify-self: center; width: 470px; border-radius: 14px; background: #fafaf8; box-shadow: 0 18px 50px rgb(0 0 0 / 0.16), 0 0 0 1px rgb(0 0 0 / 0.06); }
   </style></head><body>
     <div class="copy">
       <img src="data:image/png;base64,${icon}" alt="">
@@ -196,11 +210,11 @@ try {
     h1 { font-size: 44px; line-height: 1.12; margin: 30px 0 16px; font-weight: 650; letter-spacing: -0.02em; }
     p { font-size: 20px; line-height: 1.5; margin: 0; color: #5f5e59; }
     b { color: #d6302a; font-weight: 600; }
-    .window { position: absolute; left: 700px; top: 64px; width: 800px; border-radius: 12px; overflow: hidden;
+    .window { position: absolute; left: 640px; top: 64px; width: 800px; border-radius: 12px; overflow: hidden;
       background: #fafaf8; box-shadow: 0 24px 60px rgb(0 0 0 / 0.16), 0 0 0 1px rgb(0 0 0 / 0.07); }
     .bar { height: 30px; background: #e9e8e3; display: flex; align-items: center; gap: 7px; padding: 0 14px; }
     .bar i { width: 10px; height: 10px; border-radius: 50%; background: #cfcec8; }
-    .window img { display: block; width: 1280px; transform-origin: 0 0; transform: scale(0.72) translateX(-250px); }
+    .window img { display: block; width: 800px; }
   </style></head><body>
     <div class="copy">
       <div class="brand"><img src="data:image/png;base64,${icon}" alt=""><span>Ration</span></div>

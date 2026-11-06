@@ -1,5 +1,5 @@
 import * as core from '../lib/core.js';
-import { getState, send, el, plural, incognitoAllowed } from './common.js';
+import { getState, send, el, plural, incognitoAllowed, EXTENSIONS_PAGE, PRIVATE_SETTING } from './common.js';
 import { renderStackedBars } from './chart.js';
 import * as stats from '../lib/stats.js';
 
@@ -25,6 +25,11 @@ let data = null; // { state, now }
 let range = 'week';
 let draft = null; // { goalMinutes, groups: [{ id, name, domainsText, opensPerDay, minutesPerOpen, waitSeconds }] }
 let draftBase = '';
+let saving = false;
+let saveAgain = false;
+let settling = false;
+const refused = new Set(); // Domains the user refused access to.
+let rowUpdaters = [];
 
 // ---------- routing ----------
 
@@ -36,7 +41,6 @@ function route() {
     if (k === name) link.setAttribute('aria-current', 'page');
     else link.removeAttribute('aria-current');
   }
-  updateSavebar();
 }
 window.addEventListener('hashchange', route);
 
@@ -49,13 +53,12 @@ async function domainsWithoutAccess() {
 }
 
 async function renderWarnings() {
-  const box = document.getElementById('warnings');
-  box.replaceChildren();
+  const box = document.createDocumentFragment();
   const missing = await domainsWithoutAccess();
   if (missing.length) {
     const allow = el('button', { class: 'primary' }, 'Allow access');
     allow.addEventListener('click', async () => {
-      // Must be the first call in the click, or Brave refuses the request.
+      // Must be the first call in the click, or the browser refuses the request.
       const ok = await chrome.permissions.request({ origins: core.originsFor(missing) }).catch(() => false);
       if (ok) {
         await load();
@@ -77,12 +80,13 @@ async function renderWarnings() {
         'p',
         { class: 'notice' },
         el('strong', {}, 'Private windows skip your limits. '),
-        'Turn on Allow in Private under Ration’s Details at ',
-        el('code', {}, 'brave://extensions'),
+        `Turn on ${PRIVATE_SETTING} under Ration’s Details at `,
+        el('code', {}, EXTENSIONS_PAGE),
         '.',
       ),
     );
   }
+  document.getElementById('warnings').replaceChildren(box);
 }
 
 // A label-and-value list laid out in one row.
@@ -343,59 +347,51 @@ function fromDraft(d) {
   };
 }
 
+function baseDraft() {
+  return toDraft(data.state.config);
+}
+
 function resetDraft() {
-  draft = toDraft(data.state.pending?.config || data.state.config);
-  draft.goalMinutes = data.state.config.goalMinutes;
+  draft = baseDraft();
   draftBase = JSON.stringify(draft);
 }
 
-function dirty() {
-  return draft && JSON.stringify(draft) !== draftBase;
+const NEEDS_ACCESS = 'Not saved. Ration needs access to this site.';
+const isBlank = (value) => String(value).trim() === '';
+
+// Why a row cannot be saved yet, or an empty string.
+function rowProblem(g) {
+  const { good, bad } = parseDomains(g.domainsText);
+  if (bad.length) return `Not a domain: ${bad.join(', ')}`;
+  if (!good.length) return 'Add a domain.';
+  if (good.some((d) => refused.has(d))) return NEEDS_ACCESS;
+  if ([g.opensPerDay, g.minutesPerOpen, g.waitSeconds].some(isBlank)) return 'Fill in every number.';
+  return '';
 }
 
-function draftErrors() {
-  const errs = [];
-  for (const g of draft.groups) {
-    const { good, bad } = parseDomains(g.domainsText);
-    if (!good.length) errs.push(`${g.name || 'A site'} needs a domain.`);
-    if (bad.length) errs.push(`Not a domain: ${bad.join(', ')}`);
-  }
-  return errs;
+const savedConfig = () => core.cleanConfig(fromDraft(JSON.parse(draftBase)));
+const isSaved = (g) => savedConfig().groups.some((x) => x.id === g.id);
+
+// The draft without its unfinished rows. A saved row keeps its saved values
+// until its edit is valid, so a half-typed edit never counts as removing a site.
+function savableConfig() {
+  const base = JSON.parse(draftBase);
+  const groups = draft.groups.flatMap((g) => {
+    if (!rowProblem(g)) return [g];
+    return base.groups.filter((x) => x.id === g.id);
+  });
+  const goalMinutes = isBlank(draft.goalMinutes) ? base.goalMinutes : draft.goalMinutes;
+  return core.cleanConfig(fromDraft({ goalMinutes, groups }));
 }
 
-// What saving the draft would loosen: limits (queued 24 hours) and the goal (at once).
-function draftLoosening() {
-  const desired = core.cleanConfig(fromDraft(draft));
-  const next = core.tightenConfig(data.state.config, desired, Date.now());
-  return {
-    limits: !core.sameRules(next, desired),
-    goal: desired.goalMinutes > data.state.config.goalMinutes,
-  };
+function changed() {
+  return Boolean(draft) && JSON.stringify(savableConfig()) !== JSON.stringify(savedConfig());
 }
 
-function updateSavebar(message) {
-  renderAllotment();
-  const show = location.hash === '#limits' && (dirty() || message);
-  savebar.hidden = !show;
-  if (!show) return;
-  const errs = dirty() ? draftErrors() : [];
-  document.getElementById('save').disabled = !dirty() || errs.length > 0;
-  document.getElementById('discard').hidden = !dirty();
-  let text = message || errs[0];
-  let red = errs.length > 0 && !message;
-  if (!text) {
-    const loose = draftLoosening();
-    if ((loose.limits || loose.goal) && data.state.streak.current > 0) {
-      text = `This loosens your limits. Your ${data.state.streak.current}-day streak resets unless you undo it within 10 minutes.`;
-      red = true;
-    } else if (loose.limits) {
-      text = 'Looser limits take effect in 24 hours.';
-    } else {
-      text = 'Unsaved changes.';
-    }
-  }
-  savemsg.textContent = text;
-  savemsg.style.color = red ? 'var(--red)' : '';
+// Shown only when a save fails. A save that works shows nothing.
+function showFailure(error) {
+  savebar.hidden = !error;
+  savemsg.textContent = error ? `Could not save: ${error}` : '';
 }
 
 // Color class for each site in the draft. Saved sites keep their slot.
@@ -447,84 +443,118 @@ function renderAllotment() {
   );
 }
 
-function describeChanges(from, to) {
-  const lines = [];
-  const toById = new Map(to.groups.map((g) => [g.id, g]));
-  for (const a of from.groups) {
-    const b = toById.get(a.id);
-    if (!b) {
-      lines.push(`Stop limiting ${a.name}`);
-      continue;
-    }
-    const n = b.name;
-    if (a.opensPerDay !== b.opensPerDay) lines.push(`${n}: ${a.opensPerDay} → ${b.opensPerDay} opens`);
-    if (a.minutesPerOpen !== b.minutesPerOpen) lines.push(`${n}: ${a.minutesPerOpen} → ${b.minutesPerOpen} minutes`);
-    if (a.waitSeconds !== b.waitSeconds) lines.push(`${n}: ${a.waitSeconds}s → ${b.waitSeconds}s wait`);
-    const gone = a.domains.filter((d) => !b.domains.includes(d));
-    if (gone.length) lines.push(`${n}: stop limiting ${gone.join(', ')}`);
+// Rebuilds the draft from saved state, keeping rows the user has not finished.
+function syncDraft() {
+  const unfinished = draft.groups.filter(rowProblem);
+  resetDraft();
+  for (const g of unfinished) {
+    const at = draft.groups.findIndex((x) => x.id === g.id);
+    if (at >= 0) draft.groups[at] = g;
+    else draft.groups.push(g);
   }
-  return lines;
+  renderLimits();
 }
 
-const DATETIME = new Intl.DateTimeFormat(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' });
-
-async function afterAction(message) {
+async function afterAction() {
   await load();
-  resetDraft();
-  renderLimits();
-  updateSavebar(message);
+  syncDraft();
+  renderLoose();
+}
+
+// Saves each change as it happens.
+function saveOnEdit(input, apply) {
+  input.addEventListener('input', () => {
+    apply(input.value);
+    renderAllotment();
+    saveDraft();
+  });
+}
+
+// Keeps a number in range. A blank field goes back to its last value when the user leaves it.
+function bindNumber(input, write, { min, max }) {
+  let last = input.value;
+  saveOnEdit(input, write);
+  input.addEventListener('change', () => {
+    last = isBlank(input.value) ? last : String(Math.min(max, Math.max(min, Math.round(Number(input.value)))));
+    input.value = last;
+    write(last);
+    renderAllotment();
+    saveDraft();
+  });
+}
+
+function addedDomains(config) {
+  const saved = new Set(savedConfig().groups.flatMap((g) => g.domains));
+  return [...new Set(config.groups.flatMap((g) => g.domains))].filter((d) => !saved.has(d));
+}
+
+// The browser only shows its access prompt during a click or key press, so this
+// function must reach chrome.permissions.request with no await before it.
+async function saveDraft() {
+  if (saving) {
+    saveAgain = true;
+    return;
+  }
+  if (!changed()) return;
+  saving = true;
+  try {
+    const config = savableConfig();
+    const added = addedDomains(config);
+    const granted = added.length ? await chrome.permissions.request({ origins: core.originsFor(added) }).catch(() => false) : true;
+    if (granted) {
+      const res = await send('saveConfig', { config });
+      await load();
+      draftBase = JSON.stringify(baseDraft());
+      showFailure(res.ok ? '' : res.error);
+    } else {
+      for (const d of added) refused.add(d);
+    }
+  } catch (e) {
+    showFailure(e.message);
+  }
+  saving = false;
+  // Updates the rows in place, so the cursor stays where it is.
+  for (const update of rowUpdaters) update();
+  renderLoose();
+  renderWarnings();
+  if (saveAgain) {
+    saveAgain = false;
+    saveDraft();
+  }
+}
+
+// The banner sits above both views, so a streak at risk shows on every page.
+function renderLoose() {
+  const box = document.getElementById('loose');
+  const deadline = data && core.looseDeadline(data.state);
+  const left = deadline ? deadline - Date.now() : 0;
+  box.hidden = left <= 0;
+  if (left > 0) {
+    const { current } = data.state.streak;
+    const cost = current > 0 ? `your ${current}-day streak resets` : 'today won’t count';
+    document.getElementById('loose-text').textContent = `You loosened your limits. Undo within ${core.formatClock(left)} or ${cost}.`;
+  } else if (deadline && !settling) {
+    settling = true;
+    load()
+      .then(() => {
+        if (!views.stats.hidden) renderStats();
+      })
+      .finally(() => {
+        settling = false;
+      });
+  }
 }
 
 function renderLimits() {
-  const { state, now } = data;
-  const activeById = new Map(state.config.groups.map((g) => [g.id, g]));
-
-  let looseBox = '';
-  if (state.loose) {
-    const left = (state.loose.since + core.GRACE_MS - now) / 1000;
-    const what = [];
-    if (state.config.goalMinutes > state.loose.baseGoal) {
-      what.push(`raised your goal from ${core.formatDuration(state.loose.baseGoal * 60)} to ${core.formatDuration(state.config.goalMinutes * 60)}`);
-    }
-    if (state.pending) what.push('queued looser limits');
-    looseBox = el(
-      'div',
-      { class: 'notice loose-box' },
-      el(
-        'p',
-        {},
-        el('span', { class: 'streak-warn' }, `Undo within ${core.formatDuration(left)} to keep your ${state.streak.current}-day streak.`),
-        what.length ? ` You ${what.join(' and ')}.` : '',
-      ),
-      el(
-        'div',
-        { class: 'actions' },
-        el('button', { class: 'primary', onclick: async () => { await send('undoLoosening'); afterAction('Undone. Your streak is safe.'); } }, 'Undo'),
-      ),
-    );
-  }
-
-  let pendingBox = '';
-  if (state.pending) {
-    const lines = describeChanges(state.config, state.pending.config);
-    pendingBox = el(
-      'div',
-      { class: 'notice pending-box' },
-      el('p', {}, el('strong', {}, `Takes effect ${DATETIME.format(new Date(state.pending.applyAt))}`), ` (in ${core.formatDuration((state.pending.applyAt - now) / 1000)})`),
-      lines.length ? el('ul', {}, lines.map((l) => el('li', {}, l))) : '',
-      el(
-        'div',
-        { class: 'actions' },
-        el('button', { onclick: async () => { await send('cancelPending'); afterAction('Cancelled.'); } }, 'Cancel'),
-      ),
-    );
-  }
-
+  rowUpdaters = [];
   const goalInput = el('input', { type: 'number', min: 0, max: 1440, step: 5, value: draft.goalMinutes, id: 'goal', 'aria-label': 'Daily goal in minutes' });
-  goalInput.addEventListener('input', () => {
-    draft.goalMinutes = goalInput.value;
-    updateSavebar();
-  });
+  bindNumber(
+    goalInput,
+    (value) => {
+      draft.goalMinutes = value;
+    },
+    core.LIMITS.goalMinutes,
+  );
   const goalBlock = el(
     'div',
     { class: 'block' },
@@ -562,7 +592,7 @@ function renderLimits() {
       draft.groups.length
         ? (() => {
             const colors = draftColors();
-            return draft.groups.map((g) => siteRow(g, activeById.get(g.id), state, now, colors.get(g.id)));
+            return draft.groups.map((g) => siteRow(g, colors.get(g.id)));
           })()
         : el('p', { class: 'empty' }, 'No sites yet.'),
     ),
@@ -570,51 +600,75 @@ function renderLimits() {
     el(
       'p',
       { class: 'faint', style: 'font-size:12px' },
-      'When you save, Brave asks to let Ration see the sites you added. Ration uses that only to show its gate and time your opens, on this device.',
+      'When you add a site, your browser asks to let Ration see it. Ration uses that only to show its gate and time your opens, on this device.',
     ),
   );
 
-  views.limits.replaceChildren(...[looseBox, pendingBox, goalBlock, sitesBlock].filter(Boolean));
+  views.limits.replaceChildren(goalBlock, sitesBlock);
   renderAllotment();
 }
 
 function numberCell(label, g, key, { min, max }) {
   const input = el('input', { type: 'number', min, max, step: 1, value: g[key], 'aria-label': label, class: 'num' });
-  input.addEventListener('input', () => {
-    g[key] = input.value;
-    updateSavebar();
-  });
+  bindNumber(
+    input,
+    (value) => {
+      g[key] = value;
+    },
+    { min, max },
+  );
   return el('div', {}, el('label', {}, label), input);
 }
 
-function siteRow(g, active, state, now, colorClass) {
+function rowStatus(g) {
+  const { state, now } = data;
+  const active = state.config.groups.find((x) => x.id === g.id);
+  const graceLeft = active?.createdAt != null ? core.GRACE_MS - (now - active.createdAt) : null;
+  if (!active) return el('p', { class: 'sub fresh' }, 'New');
+  if (graceLeft > 0) return el('p', { class: 'sub fresh' }, `Free to edit for ${core.formatDuration(graceLeft / 1000)}`);
+  const spent = core.opensUsed(state, g.id) >= active.opensPerDay;
+  return el('p', { class: spent ? 'sub num spent' : 'sub num' }, `${core.opensUsed(state, g.id)} of ${active.opensPerDay} opens used today`);
+}
+
+function siteRow(g, colorClass) {
   const name = el('input', { type: 'text', value: g.name, placeholder: 'Name', 'aria-label': 'Name', class: `name ${colorClass}` });
-  name.addEventListener('input', () => {
-    g.name = name.value;
-    updateSavebar();
+  saveOnEdit(name, (value) => {
+    g.name = value;
   });
   const domains = el('input', { type: 'text', value: g.domainsText, placeholder: 'example.com', spellcheck: 'false', 'aria-label': 'Domains, separated by commas' });
   const errLine = el('p', { class: 'err' });
-  const checkDomains = () => {
-    const { bad } = parseDomains(domains.value);
-    errLine.textContent = bad.length ? `Not a domain: ${bad.join(', ')}` : '';
-    errLine.hidden = !bad.length;
+  const statusBox = el('div', {});
+
+  const allowAccess = () => {
+    for (const d of parseDomains(g.domainsText).good) refused.delete(d);
+    saveDraft();
   };
+  const updateRow = () => {
+    statusBox.replaceChildren(rowStatus(g));
+    // A new row with no domain yet is unfinished, not wrong.
+    const problem = isBlank(g.domainsText) && !isSaved(g) ? '' : rowProblem(g);
+    errLine.replaceChildren(problem);
+    if (problem === NEEDS_ACCESS) errLine.append(' ', el('button', { onclick: allowAccess }, 'Allow access'));
+    errLine.hidden = !problem;
+  };
+  rowUpdaters.push(updateRow);
+  updateRow();
+
+  // Domains save when the user leaves the field, because each new domain
+  // opens the browser's access prompt.
   domains.addEventListener('input', () => {
     g.domainsText = domains.value;
-    checkDomains();
-    updateSavebar();
+    renderAllotment();
   });
-  checkDomains();
-
-  const graceLeft = active?.createdAt != null ? core.GRACE_MS - (now - active.createdAt) : null;
-  let status;
-  if (!active) status = el('p', { class: 'sub fresh' }, 'New');
-  else if (graceLeft > 0) status = el('p', { class: 'sub fresh' }, `Free to edit for ${core.formatDuration(graceLeft / 1000)}`);
-  else {
-    const spent = core.opensUsed(state, g.id) >= active.opensPerDay;
-    status = el('p', { class: spent ? 'sub num spent' : 'sub num' }, `${core.opensUsed(state, g.id)} of ${active.opensPerDay} opens used today`);
-  }
+  domains.addEventListener('change', () => {
+    const { good, bad } = parseDomains(g.domainsText);
+    if (good.length && !bad.length) {
+      g.domainsText = good.join(', ');
+      domains.value = g.domainsText;
+    }
+    updateRow();
+    saveDraft();
+  });
 
   const remove = el(
     'button',
@@ -625,7 +679,7 @@ function siteRow(g, active, state, now, colorClass) {
       onclick: () => {
         draft.groups = draft.groups.filter((x) => x !== g);
         renderLimits();
-        updateSavebar();
+        saveDraft();
       },
     },
     '×',
@@ -634,7 +688,7 @@ function siteRow(g, active, state, now, colorClass) {
   return el(
     'div',
     { class: 'site-row' },
-    el('div', { class: 'c-name' }, name, status),
+    el('div', { class: 'c-name' }, name, statusBox),
     el('div', { class: 'c-domains' }, domains, errLine),
     numberCell('Opens', g, 'opensPerDay', core.LIMITS.opensPerDay),
     numberCell('Minutes', g, 'minutesPerOpen', core.LIMITS.minutesPerOpen),
@@ -653,43 +707,24 @@ function addGroup(name, domains) {
     waitSeconds: 10,
   });
   renderLimits();
-  updateSavebar();
+  saveDraft();
   const rows = views.limits.querySelectorAll('.site-row');
   const last = rows[rows.length - 1];
   last?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   last?.querySelector(name ? 'input[type=number]' : 'input.name')?.focus();
 }
 
-document.getElementById('discard').addEventListener('click', () => {
-  resetDraft();
-  renderLimits();
-  updateSavebar();
+// A save may still be running when the page closes, so this sends the latest
+// edit. A new domain stays unsaved, because the access prompt needs a live page.
+window.addEventListener('pagehide', () => {
+  if (!changed()) return;
+  const config = savableConfig();
+  if (!addedDomains(config).length) send('saveConfig', { config }).catch(() => {});
 });
 
-document.getElementById('save').addEventListener('click', async () => {
-  const config = fromDraft(draft);
-  // Ask for access to exactly the saved sites. This must be the first call
-  // in the click, or Brave refuses the request.
-  const origins = core.originsFor(config.groups.flatMap((g) => g.domains));
-  const granted = origins.length ? await chrome.permissions.request({ origins }).catch(() => false) : true;
-  if (!granted) {
-    return updateSavebar('Ration needs access to these sites to show its gate and time your opens. Nothing was saved.');
-  }
-  document.getElementById('save').disabled = true;
-  const res = await send('saveConfig', { config });
-  await load();
-  resetDraft();
-  renderLimits();
-  if (!res.ok) return updateSavebar(`Could not save: ${res.error}`);
-  const { pending, loose } = data.state;
-  let msg = pending ? `Saved. Looser limits take effect ${DATETIME.format(new Date(pending.applyAt))}.` : 'Saved.';
-  if (loose) msg += ` Undo within ${core.formatDuration((loose.since + core.GRACE_MS - Date.now()) / 1000)} to keep your streak.`;
-  updateSavebar(msg);
-  renderWarnings();
-});
-
-window.addEventListener('beforeunload', (e) => {
-  if (dirty()) e.preventDefault();
+document.getElementById('undo').addEventListener('click', async () => {
+  await send('undoLoosening');
+  afterAction();
 });
 
 // ---------- load ----------
@@ -705,13 +740,12 @@ async function main() {
   renderStats();
   renderLimits();
   route();
+  renderLoose();
+  setInterval(renderLoose, 1000);
   setInterval(async () => {
     await load();
     if (!views.stats.hidden) renderStats();
-    if (!views.limits.hidden && !dirty() && !document.activeElement?.matches('input, textarea')) {
-      resetDraft();
-      renderLimits();
-    }
+    if (!views.limits.hidden && !saving && !changed() && !document.activeElement?.matches('input, textarea')) syncDraft();
   }, 30_000);
 }
 

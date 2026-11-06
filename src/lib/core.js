@@ -1,10 +1,9 @@
 // Pure state logic. No chrome.* calls here, so Node tests can import this file.
 
-export const STATE_VERSION = 3;
-export const PENDING_DELAY_MS = 24 * 60 * 60 * 1000;
+export const STATE_VERSION = 5;
 // New sites stay free to edit for this long. A loosening edit undone
 // within this long keeps the streak.
-export const GRACE_MS = 10 * 60 * 1000;
+export const GRACE_MS = 3 * 60 * 1000;
 // One tracked segment never adds more than this. The minute alarm flushes
 // tracking, so a longer gap means the computer slept or the browser closed.
 export const SEGMENT_CAP_MS = 2 * 60 * 1000;
@@ -127,6 +126,7 @@ const union = (a, b) => [...a, ...b.filter((x) => !a.includes(x))];
 // every change that tightens a limit, and none that loosens one.
 // A group still inside its grace period takes `desired` as-is.
 // The daily goal is not a limit: it always takes `desired`.
+// Rule comparisons and undoLoosening use this. Saves apply `desired` directly.
 export function tightenConfig(active, desired, now, { grace = true } = {}) {
   const inGrace = (g) => grace && g.createdAt != null && now - g.createdAt < GRACE_MS;
   const activeById = new Map(active.groups.map((g) => [g.id, g]));
@@ -182,83 +182,70 @@ export function atLeastAsStrict(b, a) {
   return sameRules(tightenConfig(a, b, 0, { grace: false }), b);
 }
 
-// Saves an edit. Tighter limits and any goal change apply now.
-// Looser limits wait PENDING_DELAY_MS.
-// Returns { applied: boolean, pending: boolean }.
+function looserThan(config, base) {
+  return config.goalMinutes > base.goalMinutes || !atLeastAsStrict(config, base);
+}
+
+// The rules an edit is measured against. A site in its free-edit period does
+// not count, so changing or removing it is never looser.
+function rulesBefore(config, now) {
+  const inFreeEdit = (g) => g.createdAt != null && now - g.createdAt < GRACE_MS;
+  return structuredClone({ goalMinutes: config.goalMinutes, groups: config.groups.filter((g) => !inFreeEdit(g)) });
+}
+
+// Saves an edit. Every change applies at once. The first change opens a
+// 3-minute window that remembers the rules from before it. If the limits are
+// looser than those rules when the window ends, the streak resets. Becoming
+// looser restarts the countdown, so there is always a full 3 minutes to undo.
+// Returns { applied: boolean }.
 export function saveConfig(state, rawDesired, now) {
+  settleLoosening(state, now);
   const desired = cleanConfig(rawDesired);
-  const prevPending = state.pending;
-  const prevGoal = state.config.goalMinutes;
+  const prev = state.config;
   // Pin today's starting goal before the goal changes, so a goal raised
   // and then lowered cannot become today's starting goal.
-  if (desired.goalMinutes !== prevGoal) dayRecord(state, state.lastDay);
-  const next = tightenConfig(state.config, desired, now);
-  const changed = !sameRules(state.config, next) || namesDiffer(state.config, next);
+  if (desired.goalMinutes !== prev.goalMinutes) dayRecord(state, state.lastDay);
+
+  const createdById = new Map(prev.groups.map((g) => [g.id, g.createdAt]));
+  const next = {
+    goalMinutes: desired.goalMinutes,
+    groups: desired.groups.map((g) => ({ ...g, createdAt: createdById.get(g.id) ?? now })),
+  };
+  const changed = !sameRules(prev, next) || namesDiffer(prev, next);
+  const wasLoose = stillLoose(state);
   state.config = next;
-
   rememberGroups(state, next);
-  rememberGroups(state, desired);
 
-  let limitsLoosened = false;
-  if (sameRules(next, desired)) {
-    state.pending = null;
-  } else {
-    // A new edit that is no looser than the queued one keeps its timer.
-    // A looser edit restarts the wait.
-    const keepTimer = prevPending && atLeastAsStrict(desired, prevPending.config);
-    limitsLoosened = !keepTimer;
-    state.pending = {
-      config: desired,
-      requestedAt: keepTimer ? prevPending.requestedAt : now,
-      applyAt: keepTimer ? prevPending.applyAt : now + PENDING_DELAY_MS,
-    };
+  if (!state.change && !sameRules(prev, next)) state.change = { since: now, base: rulesBefore(prev, now) };
+  if (state.change) {
+    if (sameRules(next, state.change.base)) state.change = null;
+    else if (!wasLoose && stillLoose(state)) state.change.since = now;
   }
-
-  // Open a 10-minute window on the first loosening. A later loosening
-  // inside the window does not restart it.
-  if ((limitsLoosened || desired.goalMinutes > prevGoal) && !state.loose) {
-    state.loose = {
-      since: now,
-      baseGoal: prevGoal,
-      basePending: prevPending ? structuredClone(prevPending) : null,
-    };
-  }
-  closeLooseIfUndone(state);
   markFailedIfOver(state);
-  return { applied: changed, pending: !!state.pending };
+  return { applied: changed };
 }
 
-// True while anything is looser than it was when the window opened.
+// True while the limits are looser than they were before the window opened.
 export function stillLoose(state) {
-  const w = state.loose;
-  if (!w) return false;
-  if (state.config.goalMinutes > w.baseGoal) return true;
-  if (!state.pending) return false;
-  return !w.basePending || !atLeastAsStrict(state.pending.config, w.basePending.config);
+  return Boolean(state.change) && looserThan(state.config, state.change.base);
 }
 
-function closeLooseIfUndone(state) {
-  if (state.loose && !stillLoose(state)) state.loose = null;
+// When the streak resets if nothing changes, or null if it is safe.
+export function looseDeadline(state) {
+  return stillLoose(state) ? state.change.since + GRACE_MS : null;
 }
 
-// Puts back everything the open window loosened. Keeps later tightenings.
+// Puts back everything the window loosened. Keeps later tightenings.
 export function undoLoosening(state, now) {
-  const w = state.loose;
-  if (!w) return false;
-  if (state.config.goalMinutes > w.baseGoal) state.config.goalMinutes = w.baseGoal;
-  if (state.pending) {
-    if (!w.basePending) {
-      state.pending = null;
-    } else {
-      const merged = tightenConfig(w.basePending.config, state.pending.config, now, { grace: false });
-      merged.goalMinutes = state.config.goalMinutes;
-      merged.groups = merged.groups.map(({ createdAt, ...g }) => g);
-      state.pending = sameRules(merged, state.config)
-        ? null
-        : { config: merged, requestedAt: w.basePending.requestedAt, applyAt: w.basePending.applyAt };
-    }
-  }
-  closeLooseIfUndone(state);
+  if (!stillLoose(state)) return false;
+  const { base } = state.change;
+  const createdById = new Map(state.config.groups.map((g) => [g.id, g.createdAt]));
+  const merged = tightenConfig(base, state.config, now, { grace: false });
+  state.config = {
+    goalMinutes: Math.min(state.config.goalMinutes, base.goalMinutes),
+    groups: merged.groups.map((g) => ({ ...g, createdAt: createdById.get(g.id) ?? g.createdAt })),
+  };
+  state.change = null;
   markFailedIfOver(state);
   return true;
 }
@@ -280,9 +267,10 @@ export function allottedMinutes(config) {
 
 // When the window closes, anything still looser resets the streak,
 // and the day the window closed cannot count toward the streak.
+// A clock set back before the window opened ends it too.
 export function settleLoosening(state, now) {
-  const w = state.loose;
-  if (!w || now < w.since + GRACE_MS) return false;
+  const w = state.change;
+  if (!w || (now >= w.since && now < w.since + GRACE_MS)) return false;
   const reset = stillLoose(state);
   if (reset) {
     let day = localDayKey(w.since + GRACE_MS);
@@ -291,32 +279,13 @@ export function settleLoosening(state, now) {
     dayRecord(state, day).loosened = true;
     state.streak.current = 0;
   }
-  state.loose = null;
+  state.change = null;
   return reset;
 }
 
 function namesDiffer(a, b) {
   const names = (c) => c.groups.map((g) => `${g.id}:${g.name}`).join('|');
   return names(a) !== names(b);
-}
-
-export function cancelPending(state) {
-  state.pending = null;
-  closeLooseIfUndone(state);
-}
-
-export function applyPendingIfDue(state, now) {
-  if (!state.pending || now < state.pending.applyAt) return false;
-  const createdById = new Map(state.config.groups.map((g) => [g.id, g.createdAt]));
-  state.config = {
-    goalMinutes: state.config.goalMinutes,
-    groups: state.pending.config.groups.map((g) => ({
-      ...g,
-      createdAt: createdById.get(g.id) ?? now,
-    })),
-  };
-  state.pending = null;
-  return true;
 }
 
 // ---------- state ----------
@@ -328,13 +297,12 @@ export function defaultState(now) {
     installedAt: now,
     lastDay: today,
     config: { goalMinutes: 60, groups: [] },
-    pending: null,
     sessions: {},
     days: {},
     streak: { current: 0, best: 0, lastEvaluated: addDays(today, -1) },
     tracking: null,
     groupMeta: {},
-    loose: null,
+    change: null,
   };
 }
 
@@ -483,12 +451,11 @@ export function flushTracking(state, now) {
   return seconds;
 }
 
-// Runs on every state access: new day, due pending edits, ended sessions.
+// Runs on every state access: settled loosening, new day, ended sessions.
 export function tick(state, now) {
   // Settle first, so the day of the loosening counts as failed when it rolls over.
-  settleLoosening(state, now);
+  const configChanged = settleLoosening(state, now);
   const dayChanged = rollover(state, now);
-  const configChanged = applyPendingIfDue(state, now);
   const expired = expireSessions(state, now);
   return { dayChanged, configChanged, expired };
 }
@@ -531,6 +498,31 @@ export function migrate(raw, now) {
     }
     raw.version = 3;
   }
+  if (raw.version === 3) {
+    // Version 4 drops the 24-hour wait, so a queued edit applies now.
+    // An open loosening window keeps its starting point.
+    const start = raw.loose?.basePending?.config ?? raw.config;
+    if (raw.loose) {
+      raw.loose = { since: raw.loose.since, base: structuredClone({ goalMinutes: raw.loose.baseGoal, groups: start.groups }) };
+    }
+    if (raw.pending) {
+      const createdById = new Map(raw.config.groups.map((g) => [g.id, g.createdAt]));
+      raw.config = {
+        goalMinutes: raw.config.goalMinutes,
+        groups: raw.pending.config.groups.map((g) => ({ ...g, createdAt: createdById.get(g.id) ?? now })),
+      };
+    }
+    delete raw.pending;
+    raw.tight = null;
+    raw.version = 4;
+  }
+  if (raw.version === 4) {
+    // Version 5 keeps one window for every edit.
+    raw.change = raw.loose ?? null;
+    delete raw.loose;
+    delete raw.tight;
+    raw.version = 5;
+  }
   if (raw.version !== STATE_VERSION) return defaultState(now);
   return raw;
 }
@@ -569,7 +561,8 @@ export function domainCovered(origins, domain) {
 // Granted origins that no saved or queued site needs any more.
 export function unusedOrigins(state, origins) {
   const needed = new Set(
-    [...state.config.groups, ...(state.pending?.config.groups || [])].flatMap((g) => g.domains).map(originFor),
+    // A site removed inside the window keeps its access, so Undo brings it back working.
+    [...state.config.groups, ...(state.change?.base.groups || [])].flatMap((g) => g.domains).map(originFor),
   );
   return origins.filter((o) => /^\*:\/\/\*\.[^/]+\/\*$/.test(o) && !needed.has(o));
 }

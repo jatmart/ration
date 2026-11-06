@@ -58,20 +58,19 @@ Brave saves the gate's icon for the site's bookmarks.
 **Matching.** A domain covers its subdomains: `youtube.com` also limits `m.youtube.com`. Add every
 domain a site uses, such as `youtu.be` for YouTube. The presets do this for common sites.
 
-**Changing limits.** Stricter limits apply at once: fewer opens, shorter opens, longer waits, new
-sites, new domains. Looser limits wait 24 hours, and the Limits page shows them with a cancel
-button. The daily goal is not held back: it changes at once in either direction. A site you just
-added stays free to edit or remove for 10 minutes, so a typo costs nothing.
+**Changing limits.** Every change applies and saves the moment you make it. Domains save when you
+leave the field, because each new domain opens the browser's access prompt. A site you just added
+stays free to edit or remove for 3 minutes.
 
 **Streak.** Each finished day adds one to the streak if your time on limited sites stayed at or
 under your daily goal. A day over the goal resets it to zero. Days with no browsing count as days
 under the goal. A lower goal counts from the next day, so lowering it never fails a day already
 under way. A higher goal counts at once.
 
-Stricter changes never touch the streak. A looser change, a higher goal included, resets it to
-zero, and that day does not count either. To keep the streak, undo the change within 10 minutes.
-The Limits page has an "Undo looser changes" button, or you can cancel or save the old values back
-yourself. Edits to a site inside its first 10 minutes do not count as looser.
+The first change opens a 3-minute window that remembers your limits from before it. If your limits
+are looser than that when the window ends, your streak resets to zero and that day does not count.
+So you can go down and back up freely. While your limits are looser, a countdown with an Undo button
+shows on the Stats and Limits pages, the popup shows it too, and the toolbar icon shows a red `!`.
 
 **Allotted time.** Your limits allow at most opens × minutes per open for each site in one day.
 The dashboard, the Limits page, and the popup show this total against your daily goal. If the
@@ -92,8 +91,7 @@ A browser extension cannot lock itself in. These routes stay open:
 - **Private windows**, unless you turn on Allow in Private (step 4).
 - **The developer tools.** Developer mode lets you inspect the extension and edit its stored data.
 - **Another browser or another Brave profile.**
-- **Moving the system clock forward** applies queued changes early and starts a new day. Moving it
-  back gains nothing: Ration never goes back a day, and a running open ends.
+- **Moving the system clock forward** starts a new day. Moving it back gains nothing: Ration never goes back a day, and a running open ends.
 
 Ration does not limit sites shown inside other pages, such as a YouTube video embedded in a blog.
 
@@ -102,7 +100,7 @@ Ration does not limit sites shown inside other pages, such as a YouTube video em
 | Path | Contents |
 |---|---|
 | `manifest.json` | Extension manifest (Manifest V3) |
-| `src/lib/core.js` | All rules: days, matching, opens, the 24-hour queue, streaks, tracking. No browser calls. |
+| `src/lib/core.js` | All rules: days, matching, opens, limit changes, streaks, tracking. No browser calls. |
 | `src/lib/stats.js` | Totals and chart bars for each stats range. No browser calls. |
 | `src/background.js` | Service worker: blocking rules, tab checks, alarms, time tracking, messages |
 | `src/pages/gate.*` | The page a limited site shows |

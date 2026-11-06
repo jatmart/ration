@@ -35,6 +35,14 @@ for (const part of ['manifest.json', 'src', 'icons']) cpSync(join(SRC, part), jo
 const testManifest = JSON.parse(readFileSync(join(EXT, 'manifest.json'), 'utf8'));
 testManifest.host_permissions = ['*://*.test/*'];
 writeFileSync(join(EXT, 'manifest.json'), JSON.stringify(testManifest, null, 2));
+
+// Ration stops counting after 60 seconds with no keyboard or mouse input, and
+// nobody touches the computer during a test run. The test copy always reads as active.
+const workerPath = join(EXT, 'src', 'background.js');
+const worker = readFileSync(workerPath, 'utf8');
+const idleCall = 'chrome.idle.queryState(60)';
+assert.ok(worker.includes(idleCall), 'background.js no longer checks for idle');
+writeFileSync(workerPath, worker.replace(idleCall, "Promise.resolve('active')"));
 const browser = await puppeteer.launch({
   executablePath: BRAVE,
   headless: process.env.HEADED ? false : true,
@@ -107,7 +115,6 @@ try {
   await step('saving a new site applies at once', async () => {
     const res = await call('saveConfig', { config: { goalMinutes: 30, groups: [blocked] } });
     assert.equal(res.ok, true);
-    assert.equal(res.pending, null);
     const s = await state();
     assert.equal(s.config.groups[0].opensPerDay, 2);
     assert.equal(s.config.goalMinutes, 30);
@@ -187,22 +194,29 @@ try {
     assert.deepEqual(res, { ok: false, error: 'no-opens' });
   });
 
-  await step('looser settings wait 24 hours, stricter ones apply now', async () => {
+  await step('looser settings apply at once, and Undo puts them back', async () => {
     // The site is seconds old, inside the free-edit period. Age it first.
     await control.evaluate(async () => {
       const { state } = await chrome.storage.local.get('state');
       state.config.groups[0].createdAt -= 60 * 60 * 1000;
+      state.change = null;
       await chrome.storage.local.set({ state });
     });
-    const res = await call('saveConfig', {
+    await call('saveConfig', {
       config: { goalMinutes: 90, groups: [{ ...blocked, opensPerDay: 9, waitSeconds: 30 }] },
     });
-    assert.ok(res.pending, 'expected a pending change');
-    const s = await state();
-    assert.equal(s.config.groups[0].opensPerDay, 2);
+    let s = await state();
+    assert.equal(s.config.groups[0].opensPerDay, 9);
     assert.equal(s.config.groups[0].waitSeconds, 30);
-    assert.equal(s.config.goalMinutes, 90, 'the goal applies at once');
-    assert.ok(Math.abs(s.pending.applyAt - Date.now() - 24 * 3600_000) < 60_000);
+    assert.equal(s.config.goalMinutes, 90);
+    assert.ok(s.change, 'the streak window is open');
+    await waitFor(async () => (await control.evaluate(() => chrome.action.getBadgeText({}))) === '!', { label: 'streak warning on the icon' });
+    await call('undoLoosening');
+    s = await state();
+    assert.equal(s.config.groups[0].opensPerDay, 2);
+    assert.equal(s.config.groups[0].waitSeconds, 30, 'the stricter wait stays');
+    assert.equal(s.change, null);
+    await waitFor(async () => (await control.evaluate(() => chrome.action.getBadgeText({}))) === '', { label: 'icon clear' });
   });
 
   await step('a newly limited site closes tabs already open on it', async () => {
@@ -210,7 +224,7 @@ try {
     await p2.goto(site('later.test', '/feed'));
     await p2.waitForSelector('#site');
     const s = await state();
-    const groups = [...s.pending.config.groups, { id: 'later', name: 'Later', domains: ['later.test'], opensPerDay: 1, minutesPerOpen: 1, waitSeconds: 0 }];
+    const groups = [...s.config.groups, { id: 'later', name: 'Later', domains: ['later.test'], opensPerDay: 1, minutesPerOpen: 1, waitSeconds: 0 }];
     await call('saveConfig', { config: { goalMinutes: 90, groups } });
     await waitFor(() => urlOf(p2).startsWith(GATE), { label: 'open tab sent to gate' });
     await p2.close();
@@ -238,11 +252,11 @@ try {
 
   await step('an open counts down only while its site is the active tab (about 80s)', async () => {
     if (process.env.QUICK) return console.log('       skipped: QUICK is set');
+    await call('undoLoosening');
     await call('saveConfig', {
       config: {
-        goalMinutes: 90,
-        // Build on the queued edit, as the Limits page does, so it stays queued.
-        groups: [...((await state()).pending?.config ?? (await state()).config).groups, { id: 'tim', name: 'Timed', domains: ['timed.test'], opensPerDay: 1, minutesPerOpen: 1, waitSeconds: 0 }],
+        goalMinutes: (await state()).config.goalMinutes,
+        groups: [...(await state()).config.groups, { id: 'tim', name: 'Timed', domains: ['timed.test'], opensPerDay: 1, minutesPerOpen: 1, waitSeconds: 0 }],
       },
     });
     const left = (sess) => sess.limitMs - sess.usedMs - (sess.activeSince != null ? Date.now() - sess.activeSince : 0);
@@ -303,7 +317,7 @@ try {
     await gatePage.waitForSelector('.actions button');
     await gatePage.evaluate(() => [...document.querySelectorAll('.actions button')].at(-1).click());
     // The extension has no "tabs" permission, so read the address from the browser side.
-    const url = await waitFor(() => (/^(chrome|brave):\/\/newtab/.test(gatePage.url()) ? gatePage.url() : null), {
+    const url = await waitFor(() => (/^(chrome|brave):\/\/(newtab|new-tab-page)/.test(gatePage.url()) ? gatePage.url() : null), {
       label: 'new tab page',
     }).catch((e) => { throw new Error(`${e.message} Page URL: ${gatePage.url()}`); });
     console.log(`       went to ${url}`);
@@ -381,7 +395,6 @@ try {
       await dash.goto(ext('src/pages/dashboard.html#limits'));
       await dash.reload();
       await dash.waitForSelector('.site-row');
-      assert.ok(await dash.$('.pending-box'), `pending box shows. pending=${JSON.stringify((await state()).pending)?.slice(0, 80)} errors=${errors.join(' | ')}`);
       assert.match(await dash.$eval('#allotment', (n) => n.innerText), /Limits allow/);
       await dash.screenshot({ path: join(SHOTS, `dashboard-limits-${scheme}.png`), fullPage: true });
       await dash.close();
@@ -399,27 +412,29 @@ try {
     assert.deepEqual(errors, []);
   });
 
-  await step('a looser edit in the UI warns about the streak, and undoing keeps it', async () => {
-    await call('cancelPending');
+  await step('a looser edit shows the undo box, and undoing keeps the streak', async () => {
     const dash = await browser.newPage();
     await dash.goto(ext('src/pages/dashboard.html#limits'));
     const goal = await dash.waitForSelector('#goal');
     await goal.click({ clickCount: 3 });
     await goal.type('500');
-    await dash.waitForFunction(() => document.getElementById('savemsg').textContent.includes('streak resets'));
-    await dash.click('#save');
-    await dash.waitForFunction(() => document.getElementById('savemsg').textContent.includes('keep your streak'));
+    await waitFor(async () => (await state()).config.goalMinutes === 500, { label: 'goal saved without leaving the field' });
     let s = await state();
     assert.equal(s.config.goalMinutes, 500, 'a raised goal applies at once');
-    assert.ok(s.loose, 'a loosening window is open');
+    assert.ok(s.change, 'a loosening window is open');
     assert.equal(s.streak.current, 4);
     await dash.waitForSelector('.loose-box .streak-warn');
     await dash.screenshot({ path: join(SHOTS, 'dashboard-loosen-warning.png'), fullPage: true });
+    await dash.evaluate(() => {
+      location.hash = '#stats';
+    });
+    await dash.waitForSelector('#view-stats:not([hidden])');
+    assert.ok(await dash.$('.loose-box:not([hidden])'), 'the warning follows you to the stats page');
+    assert.match(await dash.$eval('#loose-text', (n) => n.textContent), /Undo within \d+:\d\d or your 4-day streak resets/);
     await dash.click('.loose-box button.primary');
-    await dash.waitForFunction(() => !document.querySelector('.loose-box'));
+    await dash.waitForFunction(() => document.querySelector('.loose-box').hidden);
     s = await state();
-    assert.equal(s.loose, null);
-    assert.equal(s.pending, null);
+    assert.equal(s.change, null);
     assert.ok(s.config.goalMinutes < 500, `goal back to ${s.config.goalMinutes}`);
     assert.equal(s.streak.current, 4);
     await dash.close();
@@ -427,7 +442,7 @@ try {
 
   await step('a site Ration has no access to is blocked outright, with no gate', async () => {
     const s0 = await state();
-    const groups = [...(s0.pending?.config ?? s0.config).groups, { id: 'nx', name: 'No access', domains: ['noaccess.example'], opensPerDay: 3, minutesPerOpen: 5, waitSeconds: 0 }];
+    const groups = [...s0.config.groups, { id: 'nx', name: 'No access', domains: ['noaccess.example'], opensPerDay: 3, minutesPerOpen: 5, waitSeconds: 0 }];
     await call('saveConfig', { config: { goalMinutes: s0.config.goalMinutes, groups } });
     const p2 = await browser.newPage();
     const err = await p2.goto(site('noaccess.example')).then(() => null, (e) => e.message);
@@ -444,26 +459,203 @@ try {
     assert.ok(!(await state()).config.groups.some((g) => g.id === 'nx'));
   });
 
-  await step('the dashboard edit flow saves through the UI, asking for access', async () => {
+  const lastRow = async (dash) => (await dash.$$('.site-row')).at(-1);
+  const lastGroup = async () => (await state()).config.groups.at(-1);
+  const limitsPage = async () => {
     const dash = await browser.newPage();
     await dash.goto(ext('src/pages/dashboard.html#limits'));
     await dash.waitForSelector('.presets button');
+    return dash;
+  };
+  const addOtherSite = async (dash, name, domain) => {
     await dash.evaluate(() => [...document.querySelectorAll('.presets button')].find((b) => b.textContent === 'Other site').click());
-    const rows = await dash.$$('.site-row');
-    const row = rows[rows.length - 1];
-    await (await row.$('input.name')).type('UI site');
-    await (await row.$('.c-domains input')).type('ui.test');
-    await dash.waitForSelector('#savebar:not([hidden])');
-    await dash.click('#save');
-    await dash.waitForFunction(() => document.getElementById('savemsg').textContent.startsWith('Saved'));
-    const s = await state();
-    const added = s.config.groups.find((g) => g.name === 'UI site');
-    assert.ok(added, 'the new site is limited');
-    assert.deepEqual(added.domains, ['ui.test']);
+    const row = await lastRow(dash);
+    await (await row.$('input.name')).type(name);
+    if (domain) await (await row.$('.c-domains input')).type(domain);
+    return row;
+  };
+  const assertQuiet = async (dash) => {
+    assert.ok(await dash.evaluate(() => document.getElementById('savebar').hidden), 'nothing announces the save');
+    assert.equal(await dash.evaluate(() => document.querySelector('.wrap').innerText.includes('Saved')), false);
+  };
+
+  await step('a new site saves itself, with nothing on screen', async () => {
+    const dash = await limitsPage();
+    assert.equal(await dash.$('#save'), null, 'there is no Save button');
+    await addOtherSite(dash, 'UI site', 'https://ui.test/path');
+    assert.ok(!(await state()).config.groups.some((g) => g.name === 'UI site'), 'nothing saves mid-typing');
+    await dash.keyboard.press('Tab');
+    await waitFor(async () => (await state()).config.groups.some((g) => g.name === 'UI site'), { label: 'site saved' });
+    assert.deepEqual((await lastGroup()).domains, ['ui.test']);
+    await dash.waitForFunction(() => [...document.querySelectorAll('.c-domains input')].at(-1).value === 'ui.test');
+    await assertQuiet(dash);
     const p2 = await browser.newPage();
     await p2.goto(site('ui.test'));
     await waitFor(() => urlOf(p2).startsWith(GATE), { label: 'gate for the new site' });
     await p2.close();
+    await dash.close();
+  });
+
+  await step('a number saves as you change it, and the cursor does not move', async () => {
+    const dash = await limitsPage();
+    const [opens] = await (await lastRow(dash)).$$('input[type=number]');
+    await opens.click({ clickCount: 3 });
+    await opens.type('25');
+    await waitFor(async () => (await lastGroup()).opensPerDay === 25, { label: 'number saved without leaving the field' });
+    await new Promise((r) => setTimeout(r, 200));
+    assert.ok(await opens.evaluate((n) => document.activeElement === n && n.value === '25'), 'the cursor stays in the field');
+    await assertQuiet(dash);
+    await dash.close();
+  });
+
+  await step('a blank number goes back to its last value', async () => {
+    const dash = await limitsPage();
+    const before = (await lastGroup()).minutesPerOpen;
+    const [, minutes] = await (await lastRow(dash)).$$('input[type=number]');
+    await minutes.click({ clickCount: 3 });
+    await dash.keyboard.press('Backspace');
+    await dash.keyboard.press('Tab');
+    await dash.waitForFunction((v) => [...document.querySelectorAll('.site-row')].at(-1).querySelectorAll('input[type=number]')[1].value === v, {}, String(before));
+    await new Promise((r) => setTimeout(r, 1200));
+    assert.equal((await lastGroup()).minutesPerOpen, before);
+    await assertQuiet(dash);
+    await dash.close();
+  });
+
+  await step('an unfinished row does not stop other edits from saving', async () => {
+    const dash = await limitsPage();
+    const finished = (await dash.$$('.site-row')).length;
+    await addOtherSite(dash, 'Unfinished');
+    await dash.keyboard.press('Tab');
+    const [opens] = await (await dash.$$('.site-row'))[finished - 1].$$('input[type=number]');
+    await opens.click({ clickCount: 3 });
+    await opens.type('21');
+    await dash.keyboard.press('Tab');
+    await waitFor(async () => (await lastGroup()).opensPerDay === 21, { label: 'edit saved past the unfinished row' });
+    assert.equal((await state()).config.groups.length, finished);
+    assert.equal((await dash.$$('.site-row')).length, finished + 1, 'the unfinished row stays on the page');
+    await dash.close();
+  });
+
+  await step('a half-typed domain on a saved site keeps the site limited', async () => {
+    const dash = await limitsPage();
+    const domain = await (await lastRow(dash)).$('.c-domains input');
+    await domain.click({ clickCount: 3 });
+    await dash.keyboard.type('not a domain!');
+    await dash.keyboard.press('Tab');
+    await dash.waitForFunction(() => [...document.querySelectorAll('.site-row .err')].some((n) => n.textContent.includes('Not a domain')));
+    await new Promise((r) => setTimeout(r, 300));
+    assert.deepEqual((await lastGroup()).domains, ['ui.test']);
+    await dash.close();
+  });
+
+  await step('closing the page saves the last edit, with no leave prompt', async () => {
+    const dash = await limitsPage();
+    const [opens] = await (await lastRow(dash)).$$('input[type=number]');
+    await opens.click({ clickCount: 3 });
+    await opens.type('19');
+    let prompted = false;
+    dash.on('dialog', (d) => {
+      prompted = true;
+      d.accept();
+    });
+    await dash.close({ runBeforeUnload: true });
+    await waitFor(async () => (await lastGroup()).opensPerDay === 19, { label: 'edit saved on close' });
+    assert.equal(prompted, false);
+  });
+
+  await step('refusing site access keeps the site off and offers to ask again', async () => {
+    const dash = await limitsPage();
+    await dash.evaluate(() => {
+      window.answer = false;
+      chrome.permissions.request = async () => window.answer;
+    });
+    await addOtherSite(dash, 'Refused', 'refused.test');
+    await dash.keyboard.press('Tab');
+    await dash.waitForSelector('.site-row .err button');
+    assert.ok(!(await state()).config.groups.some((g) => g.name === 'Refused'));
+    await dash.evaluate(() => {
+      window.answer = true;
+    });
+    await dash.click('.site-row .err button');
+    await waitFor(async () => (await state()).config.groups.some((g) => g.name === 'Refused'), { label: 'saved after allowing' });
+    await dash.waitForFunction(() => !document.querySelector('.site-row .err button'));
+    await dash.close();
+  });
+
+  await step('the egg shows on the gate, the popup, and the dashboard', async () => {
+    const eggHeight = (page, selector) =>
+      page.$eval(selector, (img) => {
+        if (!img.complete || !img.naturalWidth) throw new Error(`no image: ${img.src}`);
+        return img.getBoundingClientRect().height;
+      });
+    const gatePage = await browser.newPage();
+    await gatePage.goto(site('ui.test'));
+    await gatePage.waitForSelector('h1 img.logo');
+    await waitFor(() => gatePage.$eval('h1 img.logo', (img) => img.complete));
+    assert.equal(await eggHeight(gatePage, 'h1 img.logo'), 34);
+    await gatePage.close();
+
+    const pop = await browser.newPage();
+    await pop.goto(ext('src/pages/popup.html'));
+    await pop.waitForSelector('h1 img.logo');
+    await waitFor(() => pop.$eval('h1 img.logo', (img) => img.complete));
+    assert.equal(await eggHeight(pop, 'h1 img.logo'), 28);
+    await pop.close();
+
+    const dash = await limitsPage();
+    await waitFor(() => dash.$eval('header.top h1 img', (img) => img.complete));
+    assert.equal(await eggHeight(dash, 'header.top h1 img'), 32);
+    await dash.close();
+  });
+
+  await step('dropping an open and raising it back on the page has no wait', async () => {
+    // This write goes around the worker's queue, so a worker save from the tab
+    // that just closed can replace it. Repeat until it holds.
+    let tries = 0;
+    await waitFor(async () => {
+      tries++;
+      await control.evaluate(async () => {
+        const { state } = await chrome.storage.local.get('state');
+        state.config.groups.at(-1).createdAt = Date.now() - 60 * 60 * 1000;
+        state.change = null;
+        await chrome.storage.local.set({ state });
+      });
+      await new Promise((r) => setTimeout(r, 300));
+      const s = await state();
+      return Date.now() - s.config.groups.at(-1).createdAt > 30 * 60_000 && s.change === null;
+    }, { label: 'site aged' });
+    if (tries > 1) console.log(`       aging the site took ${tries} tries`);
+    const dash = await limitsPage();
+    const start = (await lastGroup()).opensPerDay;
+    const setOpens = async (value) => {
+      const [opens] = await (await lastRow(dash)).$$('input[type=number]');
+      await opens.click({ clickCount: 3 });
+      await opens.type(String(value));
+      await dash.keyboard.press('Tab');
+      await waitFor(async () => (await lastGroup()).opensPerDay === value, { label: `opens at ${value}` });
+    };
+    await setOpens(start - 1);
+    await setOpens(start);
+    assert.equal(await dash.$('.loose-box:not([hidden])'), null, 'going down and back shows nothing');
+
+    await setOpens(start + 1);
+    await dash.waitForSelector('.loose-box:not([hidden])');
+    await setOpens(start);
+    await dash.waitForFunction(() => document.querySelector('.loose-box').hidden);
+    await setOpens(start + 1);
+    await dash.waitForSelector('.loose-box:not([hidden])');
+    await dash.click('.loose-box button.primary');
+    await dash.waitForFunction(() => document.querySelector('.loose-box').hidden);
+    await dash.close();
+  });
+
+  await step('notices name the right settings for this browser', async () => {
+    const dash = await limitsPage();
+    const chrome = /chrome(\.exe)?$/i.test(BRAVE);
+    const text = await dash.evaluate(() => document.getElementById('warnings').innerText);
+    assert.ok(text.includes(chrome ? 'chrome://extensions' : 'brave://extensions'), text);
+    assert.ok(text.includes(chrome ? 'Allow in Incognito' : 'Allow in Private'), text);
     await dash.close();
   });
 } catch (e) {

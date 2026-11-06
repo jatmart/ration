@@ -1,6 +1,6 @@
 {
   "name": "ration",
-  "version": "1.0.0",
+  "version": "1.0.3",
   "private": true,
   "description": "Brave extension: daily opens per site, a time limit per open, streaks, and screen time stats.",
   "type": "module",

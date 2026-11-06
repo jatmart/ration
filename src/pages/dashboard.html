@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Ration</title>
-  <link rel="icon" href="../../icons/icon32.png?v=egg">
+  <link rel="icon" href="../../icons/icon32.png?v=egg2">
   <link rel="stylesheet" href="common.css">
   <style>
     /* Site colors, fixed by the order sites were added. Light, then dark. */
@@ -33,7 +33,7 @@
       padding: 24px 0 20px; border-bottom: 1px solid var(--line); margin-bottom: 28px;
     }
     header.top h1 { font-size: 16px; display: flex; align-items: center; gap: 8px; }
-    header.top h1 img { width: 22px; height: 22px; }
+    header.top h1 img { width: 32px; height: 32px; }
     nav { display: flex; gap: 20px; }
     nav a { color: var(--text-3); text-decoration: none; font-weight: 500; padding-bottom: 2px; }
     nav a:hover { color: var(--text); }
@@ -104,6 +104,8 @@
     .notice .actions { margin-top: 8px; display: flex; gap: 8px; }
     .notice ul { margin: 6px 0 0; padding-left: 16px; }
     .streak-warn { color: var(--red); font-weight: 600; }
+    .loose-box { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 0 10px 12px; margin-bottom: 20px; background: var(--bg); }
+    .loose-box[hidden] { display: none; }
     .goal-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
     .goal-row input { width: 76px; }
     #allotment { display: grid; gap: 8px; max-width: 520px; }
@@ -127,6 +129,7 @@
     .site-row .sub { font-size: 11px; color: var(--text-3); margin-top: 4px; }
     .site-row .sub.fresh { color: var(--text-2); }
     .site-row .err { font-size: 11px; color: var(--red); margin-top: 4px; }
+    .site-row .err button { all: unset; cursor: pointer; text-decoration: underline; }
     .site-row .x { border: 0; padding: 4px 0; color: var(--text-3); font-size: 16px; line-height: 1; }
     .site-row .x:hover { color: var(--red); }
     .site-row label { display: none; font-size: 11px; color: var(--text-3); }
@@ -144,37 +147,34 @@
     .presets button:hover { color: var(--text); text-decoration-color: currentColor; }
     .empty { color: var(--text-2); padding: 12px 0; border-bottom: 1px solid var(--line); }
 
-    .privacy { margin-top: 56px; padding-top: 14px; border-top: 1px solid var(--line); font-size: 12px; color: var(--text-3); }
     .savebar {
       position: fixed; left: 0; right: 0; bottom: 0; padding: 12px 16px;
       background: var(--bg); border-top: 1px solid var(--line);
     }
     .savebar .inner { max-width: 760px; margin: 0 auto; display: flex; align-items: center; gap: 10px; justify-content: flex-end; flex-wrap: wrap; }
-    .savebar .msg { margin-right: auto; font-size: 13px; color: var(--text-2); }
+    .savebar .msg { margin-right: auto; font-size: 13px; color: var(--red); }
   </style>
 </head>
 <body>
   <div class="wrap">
     <header class="top">
-      <h1><img src="../../icons/icon48.png?v=egg" alt="">Ration</h1>
+      <h1><img src="../../icons/icon48.png?v=egg2" srcset="../../icons/icon48.png?v=egg2 1x, ../../icons/icon128.png?v=egg2 2x" alt="">Ration</h1>
       <nav>
         <a href="#stats" id="nav-stats">Stats</a>
         <a href="#limits" id="nav-limits">Limits</a>
       </nav>
     </header>
+    <div class="notice loose-box" id="loose" hidden>
+      <span class="streak-warn num" id="loose-text"></span>
+      <button class="primary" id="undo">Undo</button>
+    </div>
     <div id="warnings"></div>
     <section id="view-stats" hidden></section>
     <section id="view-limits" hidden></section>
-    <footer class="privacy">
-      Everything Ration records stays in this browser, on this device. No account, no servers, no
-      analytics, and nothing is ever sent or sold.
-    </footer>
   </div>
   <div class="savebar" id="savebar" hidden>
     <div class="inner">
       <span class="msg" id="savemsg"></span>
-      <button id="discard">Discard</button>
-      <button class="primary" id="save">Save</button>
     </div>
   </div>
   <script type="module" src="dashboard.js"></script>

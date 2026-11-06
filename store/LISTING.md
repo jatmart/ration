@@ -24,7 +24,7 @@ address is verified.
 
 ## 2. Package tab
 
-Upload `dist/ration-1.0.0.zip`.
+Upload `dist/ration-1.0.3.zip`.
 
 ---
 
@@ -46,8 +46,7 @@ HOW IT WORKS
 • When the time is up, the site shuts. When the opens are gone, it stays shut until midnight.
 
 NO EASY WAY OUT
-• Stricter limits apply at once. Looser limits wait 24 hours.
-• Any looser change resets your streak, unless you undo it within 10 minutes.
+• Change your limits any time. Any looser change resets your streak, unless you undo it within 3 minutes.
 • Setting the clock back does not bring back spent opens.
 
 STREAKS AND STATS

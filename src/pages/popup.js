@@ -1,5 +1,5 @@
 import * as core from '../lib/core.js';
-import { getState, send, el, plural, incognitoAllowed } from './common.js';
+import { getState, send, el, plural, incognitoAllowed, EXTENSIONS_PAGE, PRIVATE_SETTING, logo } from './common.js';
 
 const app = document.getElementById('app');
 let data = null;
@@ -26,7 +26,7 @@ function render() {
   const header = el(
     'div',
     { class: 'top' },
-    el('h1', {}, 'Ration'),
+    el('h1', {}, logo(), 'Ration'),
     el(
       'div',
       { class: 'streak', title: `Best: ${plural(state.streak.best, 'day')}` },
@@ -41,9 +41,9 @@ function render() {
         'p',
         { class: 'notice' },
         'Private windows skip your limits. Turn on ',
-        el('strong', {}, 'Allow in Private'),
+        el('strong', {}, PRIVATE_SETTING),
         ' under Ration’s Details at ',
-        el('code', {}, 'brave://extensions'),
+        el('code', {}, EXTENSIONS_PAGE),
         '.',
       );
 
@@ -110,9 +110,9 @@ function render() {
   }
 
   const notes = [];
-  if (state.pending) notes.push(`Looser limits apply in ${core.formatDuration((state.pending.applyAt - now) / 1000)}.`);
-  if (state.loose) notes.push(`Undo within ${core.formatClock(state.loose.since + core.GRACE_MS - now)} to keep your streak.`);
-  const pending = notes.length ? el('p', { class: state.loose ? 'notice num' : 'note num' }, notes.join(' ')) : '';
+  const deadline = core.looseDeadline(state);
+  if (deadline) notes.push(`You loosened your limits. Undo on the Limits page within ${core.formatClock(deadline - Date.now())} to keep your streak.`);
+  const note = notes.length ? el('p', { class: 'notice num' }, notes.join(' ')) : '';
 
   const foot = el(
     'div',
@@ -132,7 +132,7 @@ function render() {
       )
     : '';
 
-  app.replaceChildren(header, warn, access, today, sites, pending, foot);
+  app.replaceChildren(header, warn, access, today, sites, note, foot);
 }
 
 async function refresh() {

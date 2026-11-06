@@ -63,7 +63,7 @@ async function syncRules(state, now) {
 }
 
 // Ration asks for access one site at a time and gives it back when no
-// saved or queued limit uses that site any more.
+// saved limit or open undo window uses that site any more.
 async function releaseUnusedAccess(state) {
   const unused = core.unusedOrigins(state, await grantedOrigins());
   if (unused.length) await chrome.permissions.remove({ origins: unused }).catch(() => {});
@@ -145,14 +145,12 @@ function updateBadge(state, now) {
   const running = Object.keys(state.sessions)
     .map((id) => core.activeSession(state, id, now))
     .find((s) => s && s.activeSince != null);
-  if (!running) {
-    chrome.action.setBadgeText({ text: '' });
-    return;
-  }
-  const mins = Math.ceil(core.sessionRemaining(running, now) / 60_000);
+  // A streak at risk shows on the icon, so it stays visible on any page.
+  const mins = running ? Math.ceil(core.sessionRemaining(running, now) / 60_000) : 0;
+  const text = running ? (mins < 100 ? `${mins}m` : `${Math.round(mins / 60)}h`) : core.looseDeadline(state) ? '!' : '';
   chrome.action.setBadgeBackgroundColor({ color: '#d6302a' });
   chrome.action.setBadgeTextColor?.({ color: '#ffffff' });
-  chrome.action.setBadgeText({ text: mins < 100 ? `${mins}m` : `${Math.round(mins / 60)}h` });
+  chrome.action.setBadgeText({ text });
 }
 
 // ---------- screen time tracking ----------
@@ -269,17 +267,10 @@ const handlers = {
       const res = core.saveConfig(state, config, now);
       effects.enforce = true;
       effects.release = true;
-      return { ok: true, ...res, config: state.config, pending: state.pending };
+      return { ok: true, ...res, config: state.config };
     });
   },
 
-  async cancelPending() {
-    return withState((state, now, effects) => {
-      core.cancelPending(state);
-      effects.release = true;
-      return { ok: true };
-    });
-  },
 
   async undoLoosening() {
     return withState((state, now, effects) => {

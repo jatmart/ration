@@ -1,5 +1,5 @@
 import * as core from '../lib/core.js';
-import { getState, send, el, plural } from './common.js';
+import { getState, send, el, plural, logo } from './common.js';
 
 const app = document.getElementById('app');
 const { groupId, reason, target } = core.parseGateUrl(location.href);
@@ -68,7 +68,7 @@ function render(state, group, now) {
       alarm
       ? el('p', { class: 'status red' }, expired ? 'Time’s up' : 'Done for today')
       : '',
-      el('h1', {}, group.name),
+      el('h1', {}, logo(), group.name),
       el('p', { class: 'host' }, host),
     ),
     el(
